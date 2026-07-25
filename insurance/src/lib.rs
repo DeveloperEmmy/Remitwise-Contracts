@@ -908,14 +908,19 @@ impl Insurance {
     }
 
     /// Get a paginated list of active policies for an owner.
-    pub fn get_active_policies(env: Env, owner: Address, cursor: u32, limit: u32) -> PolicyPage {
-        if Self::require_initialized(&env).is_err() {
-            return PolicyPage {
-                items: Vec::new(&env),
-                next_cursor: 0,
-                count: 0,
-            };
-        }
+    ///
+    /// See [`docs/PAGINATION_HANDBOOK.md`](../../docs/PAGINATION_HANDBOOK.md) for the invariants
+    /// all paginated reads must satisfy, cursor semantics, and the reviewer checklist.
+    ///
+    /// # Errors
+    /// - `NotInitialized` if the contract has not been initialized
+    pub fn get_active_policies(
+        env: Env,
+        owner: Address,
+        cursor: u32,
+        limit: u32,
+    ) -> Result<PolicyPage, InsuranceError> {
+        Self::require_initialized(&env)?;
 
         let owner_ids = env
             .storage()
@@ -962,6 +967,13 @@ impl Insurance {
     }
 
     /// Get a paginated list of deactivated policies for an owner.
+    ///
+    /// See [`docs/PAGINATION_HANDBOOK.md`](../../docs/PAGINATION_HANDBOOK.md) for the invariants
+    /// all paginated reads must satisfy, cursor semantics, and the reviewer checklist.
+    ///
+    /// Mirrors the shape and semantics of `get_active_policies` but filters
+    /// for policies where `active == false`. `limit` is normalized via
+    /// `remitwise_common::clamp_limit`.
     pub fn get_deactivated_policies(
         env: Env,
         owner: Address,
