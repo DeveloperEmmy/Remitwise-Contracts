@@ -2282,3 +2282,180 @@ fn test_pre_upgrade_discard() {
     let result = client.try_discard_snapshot(&admin);
     assert!(result.is_ok());
 }
+
+// ── Event-version guard tests ──────────────────────────────────────────
+// Covers the three boundary categories: supported, previous (too old),
+// and unsupported (future).  The range-based guard in verify_snapshot /
+// import_snapshot accepts versions in [MIN_SUPPORTED_SCHEMA_VERSION,
+// SCHEMA_VERSION]; everything else is rejected with UnsupportedVersion.
+
+fn make_test_snapshot(
+    env: &Env,
+    version: u32,
+    owner: &Address,
+    token_addr: &Address,
+) -> ExportSnapshot {
+    let config = SplitConfig {
+        owner: owner.clone(),
+        spending_percent: 50,
+        savings_percent: 30,
+        bills_percent: 15,
+        insurance_percent: 5,
+        timestamp: env.ledger().timestamp(),
+        initialized: true,
+        usdc_contract: token_addr.clone(),
+    };
+    let schedules: Vec<RemittanceSchedule> = Vec::new(env);
+    let checksum = RemittanceSplit::compute_checksum(version, &config, &schedules);
+    ExportSnapshot {
+        schema_version: version,
+        checksum,
+        config,
+        schedules,
+        exported_at: env.ledger().timestamp(),
+    }
+}
+
+#[test]
+fn test_verify_snapshot_current_version_succeeds() {
+    let env = Env::default();
+    set_time(&env, 1_000);
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let snapshot = make_test_snapshot(&env, SCHEMA_VERSION, &owner, &token_addr);
+    let result = RemittanceSplit::verify_snapshot(env.clone(), snapshot);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_verify_snapshot_min_supported_version_succeeds() {
+    let env = Env::default();
+    set_time(&env, 1_000);
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let snapshot =
+        make_test_snapshot(&env, MIN_SUPPORTED_SCHEMA_VERSION, &owner, &token_addr);
+    let result = RemittanceSplit::verify_snapshot(env.clone(), snapshot);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_verify_snapshot_rejects_version_zero() {
+    let env = Env::default();
+    set_time(&env, 1_000);
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let snapshot = make_test_snapshot(&env, 0, &owner, &token_addr);
+    let result = RemittanceSplit::verify_snapshot(env.clone(), snapshot);
+    assert_eq!(result, Err(RemittanceSplitError::UnsupportedVersion));
+}
+
+#[test]
+fn test_verify_snapshot_rejects_future_version() {
+    let env = Env::default();
+    set_time(&env, 1_000);
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let snapshot = make_test_snapshot(&env, SCHEMA_VERSION + 1, &owner, &token_addr);
+    let result = RemittanceSplit::verify_snapshot(env.clone(), snapshot);
+    assert_eq!(result, Err(RemittanceSplitError::UnsupportedVersion));
+}
+
+#[test]
+fn test_import_snapshot_rejects_previous_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let (client, owner, token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    let config = SplitConfig {
+        owner: owner.clone(),
+        spending_percent: 50,
+        savings_percent: 30,
+        bills_percent: 15,
+        insurance_percent: 5,
+        timestamp: env.ledger().timestamp(),
+        initialized: true,
+        usdc_contract: token_addr,
+    };
+    let schedules: Vec<RemittanceSchedule> = Vec::new(&env);
+    let snapshot = ExportSnapshot {
+        schema_version: 0,
+        checksum: 0,
+        config,
+        schedules,
+        exported_at: env.ledger().timestamp(),
+    };
+
+    let nonce = 1;
+    let result = client.try_import_snapshot(&owner, &nonce, &snapshot);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::UnsupportedVersion)));
+}
+
+#[test]
+fn test_import_snapshot_rejects_future_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let (client, owner, token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    let config = SplitConfig {
+        owner: owner.clone(),
+        spending_percent: 50,
+        savings_percent: 30,
+        bills_percent: 15,
+        insurance_percent: 5,
+        timestamp: env.ledger().timestamp(),
+        initialized: true,
+        usdc_contract: token_addr,
+    };
+    let schedules: Vec<RemittanceSchedule> = Vec::new(&env);
+    let snapshot = ExportSnapshot {
+        schema_version: SCHEMA_VERSION + 1,
+        checksum: 0,
+        config,
+        schedules,
+        exported_at: env.ledger().timestamp(),
+    };
+
+    let nonce = 1;
+    let result = client.try_import_snapshot(&owner, &nonce, &snapshot);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::UnsupportedVersion)));
+}
+
+#[test]
+fn test_restore_from_snapshot_wrong_version_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let admin = Address::generate(&env);
+    client.set_upgrade_admin(&owner, &admin);
+
+    // Take a valid pre-upgrade snapshot
+    client.pre_upgrade(&admin);
+
+    // Corrupt the stored snapshot's schema_version so it no longer matches
+    // SNAPSHOT_VERSION
+    env.as_contract(&client.address, || {
+        let mut snapshot: PreUpgradeSnapshot = env
+            .storage()
+            .persistent()
+            .get(&SNAPSHOT_KEY)
+            .unwrap();
+        snapshot.schema_version = SNAPSHOT_VERSION + 1;
+        env.storage()
+            .persistent()
+            .set(&SNAPSHOT_KEY, &snapshot);
+    });
+
+    let result = client.try_restore_from_snapshot(&admin);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::UnsupportedVersion)));
+}

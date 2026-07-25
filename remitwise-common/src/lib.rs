@@ -1,7 +1,7 @@
 #![no_std]
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-use soroban_sdk::{contracterror, contracttype, symbol_short, Symbol};
+use soroban_sdk::{contracterror, contracttype, symbol_short, Bytes, BytesN, Symbol};
 
 /// Financial categories for remittance allocation
 #[contracttype]
@@ -206,19 +206,23 @@ pub fn verify_signature(
         return Err(SignatureError::InvalidPublicKeyLength);
     }
 
-    let mut prefixed_message = Vec::with_capacity(domain_separator.len() + message.len());
+    let mut prefixed_message = Bytes::new(env);
     prefixed_message.extend_from_slice(domain_separator);
     prefixed_message.extend_from_slice(message);
 
-    let sig_bytes = soroban_sdk::Bytes::from_slice(env, signature);
-    let pk_bytes = soroban_sdk::Bytes::from_slice(env, public_key);
-    let msg_bytes = soroban_sdk::Bytes::from_slice(env, &prefixed_message);
+    let sig_bytes: BytesN<64> = {
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(signature);
+        BytesN::from_array(env, &arr)
+    };
+    let pk_bytes: BytesN<32> = {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(public_key);
+        BytesN::from_array(env, &arr)
+    };
 
-    if soroban_sdk::crypto::ed25519_verify(&pk_bytes, &msg_bytes, &sig_bytes) {
-        Ok(())
-    } else {
-        Err(SignatureError::VerificationFailed)
-    }
+    env.crypto().ed25519_verify(&pk_bytes, &prefixed_message, &sig_bytes);
+    Ok(())
 }
 
 /// Validates and canonicalizes a batch of tags without panicking.
