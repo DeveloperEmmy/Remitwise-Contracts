@@ -1,19 +1,21 @@
+#![allow(deprecated, clippy::all)]
 use soroban_sdk::testutils::storage::Instance as StorageInstance;
 use soroban_sdk::{
+    symbol_short,
     testutils::{Address as _, Ledger, LedgerInfo},
     Address, Env,
 };
 use testutils::set_ledger_time;
 
 use crate::{
-    Category, ContractAddresses, CoverageType, DataAvailability, ReportingContract,
-    ReportingContractClient, ReportingError, MAX_DEP_PAGES,
+    Category, ContractAddresses, DataAvailability, ReportingContract, ReportingContractClient,
+    ReportingError, MAX_DEP_PAGES,
 };
 
 /// Minimal env with mock_all_auths — replaces the removed create_test_env helper.
 fn create_test_env() -> Env {
     let env = Env::default();
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     env
 }
 
@@ -28,19 +30,19 @@ mod remittance_split {
     impl RemittanceSplit {
         pub fn get_split(env: &Env) -> Vec<u32> {
             let mut split = Vec::new(env);
-            split.push_back(50);
-            split.push_back(30);
-            split.push_back(15);
-            split.push_back(5);
+            split.push_back(5000);
+            split.push_back(3000);
+            split.push_back(1500);
+            split.push_back(500);
             split
         }
 
         pub fn calculate_split(env: Env, total_amount: i128) -> Vec<i128> {
             let mut amounts = Vec::new(&env);
-            amounts.push_back(total_amount * 50 / 100);
-            amounts.push_back(total_amount * 30 / 100);
-            amounts.push_back(total_amount * 15 / 100);
-            amounts.push_back(total_amount * 5 / 100);
+            amounts.push_back(total_amount * 5000 / 10000);
+            amounts.push_back(total_amount * 3000 / 10000);
+            amounts.push_back(total_amount * 1500 / 10000);
+            amounts.push_back(total_amount * 500 / 10000);
             amounts
         }
     }
@@ -189,6 +191,7 @@ mod bill_payments {
 mod insurance {
     use crate::{InsurancePolicy, InsuranceTrait};
     use remitwise_common::CoverageType;
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
 
     #[contract]
@@ -202,22 +205,32 @@ mod insurance {
             _cursor: u32,
             _limit: u32,
         ) -> crate::PolicyPage {
-            let mut policies = Vec::new(&env);
-            policies.push_back(InsurancePolicy {
-                id: 1,
-                owner: _owner,
-                name: SorobanString::from_str(&env, "Health Insurance"),
-                coverage_type: CoverageType::Health,
-                monthly_premium: 200,
-                coverage_amount: 50000,
-                active: true,
-                next_payment_date: 1735689600,
-                external_ref: None,
-            });
+            let mut items = Vec::new(&env);
+            items.push_back(1u32);
             crate::PolicyPage {
-                items: policies,
+                count: items.len(),
+                items,
                 next_cursor: 0,
-                count: 1,
+            }
+        }
+
+        fn get_policy(env: Env, policy_id: u32) -> Option<InsurancePolicy> {
+            if policy_id == 1 {
+                Some(InsurancePolicy {
+                    id: 1,
+                    owner: Address::generate(&env),
+                    name: SorobanString::from_str(&env, "Health Insurance"),
+                    coverage_type: CoverageType::Health,
+                    monthly_premium: 200,
+                    coverage_amount: 50000,
+                    external_ref: None,
+                    active: true,
+                    created_at: 1704067200,
+                    last_payment_at: 0,
+                    next_payment_date: 1735689600,
+                })
+            } else {
+                None
             }
         }
 
@@ -228,7 +241,9 @@ mod insurance {
 }
 
 mod family_wallet {
-    use soroban_sdk::{contract, contractimpl, Address, Env};
+    use crate::{MemberAddressPage, SpendingPeriod, SpendingTracker};
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Vec};
 
     #[contract]
     pub struct FamilyWallet;
@@ -236,7 +251,249 @@ mod family_wallet {
     #[contractimpl]
     impl FamilyWallet {
         pub fn get_owner(env: Env) -> Address {
-            env.current_contract_address()
+            Address::generate(&env)
+        }
+
+        pub fn get_member_addresses_page(env: Env, _cursor: u32, _limit: u32) -> MemberAddressPage {
+            MemberAddressPage {
+                items: Vec::new(&env),
+                next_cursor: 0,
+                count: 0,
+            }
+        }
+
+        pub fn get_spending_tracker(_env: Env, _member: Address) -> Option<SpendingTracker> {
+            None
+        }
+    }
+
+    fn tracker(current_spent: i128) -> SpendingTracker {
+        SpendingTracker {
+            current_spent,
+            last_tx_timestamp: 1_704_067_200,
+            tx_count: 1,
+            period: SpendingPeriod {
+                period_type: 2,
+                period_start: 1_704_067_200,
+                period_duration: 2_592_000,
+            },
+        }
+    }
+
+    pub const MODE_COMPLETE: u32 = 0;
+    pub const MODE_PARTIAL_TRACKER: u32 = 1;
+    pub const MODE_MISSING: u32 = 2;
+    pub const MODE_EMPTY: u32 = 3;
+    pub const MODE_OVERFLOW: u32 = 4;
+    pub const MODE_DUPLICATE_PAGES: u32 = 5;
+
+    mod scenario {
+        use super::*;
+
+        #[contract]
+        pub struct FamilyWalletScenario;
+
+        #[contractimpl]
+        impl FamilyWalletScenario {
+            pub fn seed(env: Env, mode: u32, members: Vec<Address>) {
+                env.storage().instance().set(&symbol_short!("MODE"), &mode);
+                env.storage()
+                    .instance()
+                    .set(&symbol_short!("MBRS"), &members);
+            }
+
+            pub fn get_owner(env: Env) -> Address {
+                let members: Vec<Address> = env
+                    .storage()
+                    .instance()
+                    .get(&symbol_short!("MBRS"))
+                    .unwrap_or_else(|| Vec::new(&env));
+                members.get(0).unwrap_or_else(|| Address::generate(&env))
+            }
+
+            pub fn get_member_addresses_page(
+                env: Env,
+                cursor: u32,
+                _limit: u32,
+            ) -> MemberAddressPage {
+                let mode: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&symbol_short!("MODE"))
+                    .unwrap_or(0);
+                if mode == MODE_MISSING {
+                    panic!("family wallet unreachable");
+                }
+                if mode == MODE_EMPTY {
+                    return MemberAddressPage {
+                        items: Vec::new(&env),
+                        next_cursor: 0,
+                        count: 0,
+                    };
+                }
+
+                let members: Vec<Address> = env
+                    .storage()
+                    .instance()
+                    .get(&symbol_short!("MBRS"))
+                    .unwrap_or_else(|| Vec::new(&env));
+
+                match mode {
+                    MODE_COMPLETE if cursor == 0 => {
+                        let mut items = Vec::new(&env);
+                        if let Some(a) = members.get(0) {
+                            items.push_back(a);
+                        }
+                        if let Some(b) = members.get(1) {
+                            items.push_back(b);
+                        }
+                        MemberAddressPage {
+                            count: items.len(),
+                            items,
+                            next_cursor: if members.len() > 2 { 2 } else { 0 },
+                        }
+                    }
+                    MODE_COMPLETE if cursor == 2 => {
+                        let mut items = Vec::new(&env);
+                        if let Some(c) = members.get(2) {
+                            items.push_back(c);
+                        }
+                        MemberAddressPage {
+                            count: items.len(),
+                            items,
+                            next_cursor: 0,
+                        }
+                    }
+                    MODE_DUPLICATE_PAGES => {
+                        let mut items = Vec::new(&env);
+                        if let Some(member) = members.get(0) {
+                            items.push_back(member);
+                        }
+                        MemberAddressPage {
+                            count: items.len(),
+                            items,
+                            next_cursor: if cursor == 0 { 1 } else { 0 },
+                        }
+                    }
+                    _ => MemberAddressPage {
+                        count: members.len(),
+                        items: members,
+                        next_cursor: 0,
+                    },
+                }
+            }
+
+            pub fn get_spending_tracker(env: Env, member: Address) -> Option<SpendingTracker> {
+                let mode: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&symbol_short!("MODE"))
+                    .unwrap_or(0);
+                if mode == MODE_MISSING {
+                    panic!("family wallet unreachable");
+                }
+
+                let members: Vec<Address> = env
+                    .storage()
+                    .instance()
+                    .get(&symbol_short!("MBRS"))
+                    .unwrap_or_else(|| Vec::new(&env));
+
+                match mode {
+                    MODE_COMPLETE => {
+                        if Some(member.clone()) == members.get(0) {
+                            Some(tracker(150))
+                        } else if Some(member.clone()) == members.get(1) {
+                            Some(tracker(50))
+                        } else {
+                            None
+                        }
+                    }
+                    MODE_PARTIAL_TRACKER => {
+                        if Some(member) == members.get(0) {
+                            Some(tracker(25))
+                        } else {
+                            panic!("tracker unavailable")
+                        }
+                    }
+                    MODE_OVERFLOW => {
+                        if Some(member) == members.get(0) {
+                            Some(tracker(i128::MAX))
+                        } else {
+                            Some(tracker(1))
+                        }
+                    }
+                    MODE_DUPLICATE_PAGES => Some(tracker(100)),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    pub use scenario::{FamilyWalletScenario, FamilyWalletScenarioClient};
+}
+
+mod family_wallet_infinite {
+    use crate::{FamilyWalletTrait, MemberAddressPage, SpendingPeriod, SpendingTracker};
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Vec};
+
+    fn tracker(current_spent: i128) -> SpendingTracker {
+        SpendingTracker {
+            current_spent,
+            last_tx_timestamp: 1_704_067_200,
+            tx_count: 1,
+            period: SpendingPeriod {
+                period_type: 2,
+                period_start: 1_704_067_200,
+                period_duration: 2_592_000,
+            },
+        }
+    }
+
+    #[contract]
+    pub struct FamilyWalletInfinite;
+
+    #[contractimpl]
+    impl FamilyWalletInfinite {
+        pub fn seed(env: Env) {
+            let mut addrs = Vec::new(&env);
+            for _ in 0..25 {
+                addrs.push_back(Address::generate(&env));
+            }
+            env.storage().instance().set(&symbol_short!("ADDR"), &addrs);
+        }
+    }
+
+    #[contractimpl]
+    impl FamilyWalletTrait for FamilyWalletInfinite {
+        fn get_owner(env: &Env) -> Address {
+            Address::generate(env)
+        }
+
+        fn get_member_addresses_page(env: Env, cursor: u32, _limit: u32) -> MemberAddressPage {
+            let addrs: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&symbol_short!("ADDR"))
+                .unwrap_or_else(|| Vec::new(&env));
+            let mut items = Vec::new(&env);
+            if let Some(member) = addrs.get(cursor) {
+                items.push_back(member);
+            }
+            MemberAddressPage {
+                count: items.len(),
+                items,
+                next_cursor: if cursor + 1 < addrs.len() {
+                    cursor + 1
+                } else {
+                    0
+                },
+            }
+        }
+
+        fn get_spending_tracker(_env: Env, _member: Address) -> Option<SpendingTracker> {
+            Some(tracker(10))
         }
     }
 }
@@ -471,6 +728,92 @@ fn test_verify_dependency_address_set_rejects_self_reference() {
 }
 
 #[test]
+fn test_verify_dependency_address_set_does_not_write_storage() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init(&admin);
+
+    let addrs = ContractAddresses {
+        remittance_split: Address::generate(&env),
+        savings_goals: Address::generate(&env),
+        bill_payments: Address::generate(&env),
+        insurance: Address::generate(&env),
+        family_wallet: Address::generate(&env),
+    };
+
+    let _ = client.try_verify_dependency_address_set(&addrs);
+
+    // Instance storage is only accessible inside a contract context, so the
+    // post-condition reads must run within `env.as_contract`.
+    let instance_snapshot: Option<Address> = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&symbol_short!("ADMIN"))
+    });
+    assert!(instance_snapshot.is_some(), "ADMIN should still exist");
+
+    let stored_addrs: Option<ContractAddresses> = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&symbol_short!("ADDRS"))
+    });
+    assert!(
+        stored_addrs.is_none(),
+        "ADDRS must not be written by preflight"
+    );
+}
+
+#[test]
+fn test_verify_dependency_address_set_rejects_multiple_duplicates() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init(&admin);
+
+    let x = Address::generate(&env);
+    let addrs = ContractAddresses {
+        remittance_split: x.clone(),
+        savings_goals: x.clone(),
+        bill_payments: x.clone(),
+        insurance: x.clone(),
+        family_wallet: x,
+    };
+    let result = client.try_verify_dependency_address_set(&addrs);
+    assert!(matches!(
+        result,
+        Err(Ok(ReportingError::InvalidDependencyAddressConfiguration))
+    ));
+}
+
+#[test]
+fn test_verify_dependency_address_set_deterministic_error() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init(&admin);
+
+    let x = Address::generate(&env);
+    let addrs = ContractAddresses {
+        remittance_split: x.clone(),
+        savings_goals: x,
+        bill_payments: Address::generate(&env),
+        insurance: Address::generate(&env),
+        family_wallet: Address::generate(&env),
+    };
+
+    let result1 = client.try_verify_dependency_address_set(&addrs);
+    let result2 = client.try_verify_dependency_address_set(&addrs);
+    assert!(matches!(
+        result1,
+        Err(Ok(ReportingError::InvalidDependencyAddressConfiguration))
+    ));
+    assert!(matches!(
+        result2,
+        Err(Ok(ReportingError::InvalidDependencyAddressConfiguration))
+    ));
+}
+
+#[test]
 fn test_get_remittance_summary() {
     let env = Env::default();
     env.mock_all_auths();
@@ -501,9 +844,10 @@ fn test_get_remittance_summary() {
     let period_start = 1704067200u64;
     let period_end = 1706745600u64;
 
-    let result = client.try_get_remittance_summary(&user, &total_amount, &period_start, &period_end);
+    let result =
+        client.try_get_remittance_summary(&user, &total_amount, &period_start, &period_end);
     assert!(result.is_ok());
-    let summary = result.unwrap();
+    let summary = result.unwrap().unwrap();
 
     assert_eq!(summary.total_received, 10000);
     assert_eq!(summary.total_allocated, 10000);
@@ -516,7 +860,7 @@ fn test_get_remittance_summary() {
     let spending = summary.category_breakdown.get(0).unwrap();
     assert_eq!(spending.category, Category::Spending);
     assert_eq!(spending.amount, 5000);
-    assert_eq!(spending.percentage, 50);
+    assert_eq!(spending.percentage, 5000);
 }
 
 #[test]
@@ -629,7 +973,7 @@ fn test_get_savings_report() {
 
     let period_start = 1704067200u64;
     let period_end = 1706745600u64;
-    let report = client.get_savings_report(&user, &period_start, &period_end);
+    let report = client.get_savings_report(&user, &user, &period_start, &period_end);
 
     assert_eq!(report.total_goals, 2);
     assert_eq!(report.completed_goals, 1);
@@ -643,7 +987,7 @@ fn test_get_savings_report_rejects_invalid_period() {
     let client = ReportingContractClient::new(&env, &contract_id);
     let user = Address::generate(&env);
 
-    let result = client.try_get_savings_report(&user, &200, &100);
+    let result = client.try_get_savings_report(&user, &user, &200, &100);
     assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
 }
 
@@ -677,7 +1021,7 @@ fn test_get_bill_compliance_report() {
     let period_start = 1704067200u64;
     let period_end = 1706745600u64;
 
-    let result = client.try_get_bill_compliance_report(&user, &period_start, &period_end);
+    let result = client.try_get_bill_compliance_report(&user, &user, &period_start, &period_end);
     assert!(result.is_ok());
 }
 
@@ -689,7 +1033,7 @@ fn test_get_bill_compliance_report_rejects_invalid_period() {
     let client = ReportingContractClient::new(&env, &contract_id);
     let user = Address::generate(&env);
 
-    let result = client.try_get_bill_compliance_report(&user, &200, &100);
+    let result = client.try_get_bill_compliance_report(&user, &user, &200, &100);
     assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
 }
 
@@ -723,7 +1067,7 @@ fn test_get_insurance_report() {
     let period_start = 1704067200u64;
     let period_end = 1706745600u64;
 
-    let result = client.try_get_insurance_report(&user, &period_start, &period_end);
+    let result = client.try_get_insurance_report(&user, &user, &period_start, &period_end);
     assert!(result.is_ok());
 }
 
@@ -735,8 +1079,375 @@ fn test_get_insurance_report_rejects_invalid_period() {
     let client = ReportingContractClient::new(&env, &contract_id);
     let user = Address::generate(&env);
 
-    let result = client.try_get_insurance_report(&user, &200, &100);
+    let result = client.try_get_insurance_report(&user, &user, &200, &100);
     assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
+}
+
+#[test]
+fn test_get_family_spending_report_complete() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1704067200);
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet_id = env.register_contract(None, family_wallet::FamilyWalletScenario);
+    let mut members = soroban_sdk::Vec::new(&env);
+    members.push_back(Address::generate(&env));
+    members.push_back(Address::generate(&env));
+    members.push_back(Address::generate(&env));
+    let family_client = family_wallet::FamilyWalletScenarioClient::new(&env, &family_wallet_id);
+    family_client.seed(&family_wallet::MODE_COMPLETE, &members);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet_id,
+    );
+
+    let report =
+        client.get_family_spending_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
+
+    assert_eq!(report.total_members, 3);
+    assert_eq!(report.total_spending, 200);
+    assert_eq!(report.average_per_member, 66);
+    assert_eq!(report.data_availability, DataAvailability::Complete);
+    assert_eq!(report.member_breakdown.len(), 3);
+
+    let first = report.member_breakdown.get(0).unwrap();
+    let second = report.member_breakdown.get(1).unwrap();
+    let third = report.member_breakdown.get(2).unwrap();
+
+    assert_ne!(first.member, second.member);
+    assert_ne!(first.member, third.member);
+    assert_ne!(second.member, third.member);
+
+    assert_eq!(first.total_spending, 150);
+    assert!(first.data_available);
+    assert_eq!(second.total_spending, 50);
+    assert!(second.data_available);
+    assert_eq!(third.total_spending, 0);
+    assert!(third.data_available);
+}
+
+#[test]
+fn test_get_family_spending_report_partial_when_member_tracker_fails() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1704067200);
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet_id = env.register_contract(None, family_wallet::FamilyWalletScenario);
+    let mut members = soroban_sdk::Vec::new(&env);
+    members.push_back(Address::generate(&env));
+    members.push_back(Address::generate(&env));
+    let family_client = family_wallet::FamilyWalletScenarioClient::new(&env, &family_wallet_id);
+    family_client.seed(&family_wallet::MODE_PARTIAL_TRACKER, &members);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet_id,
+    );
+
+    let report =
+        client.get_family_spending_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
+
+    assert_eq!(report.total_members, 2);
+    assert_eq!(report.total_spending, 25);
+    assert_eq!(report.data_availability, DataAvailability::Partial);
+    assert_eq!(report.member_breakdown.len(), 2);
+    assert!(report.member_breakdown.get(0).unwrap().data_available);
+    assert!(!report.member_breakdown.get(1).unwrap().data_available);
+    assert_eq!(report.member_breakdown.get(1).unwrap().total_spending, 0);
+}
+
+#[test]
+fn test_get_family_spending_report_missing_when_wallet_unreachable() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1704067200);
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet_id = env.register_contract(None, family_wallet::FamilyWalletScenario);
+    let mut members = soroban_sdk::Vec::new(&env);
+    members.push_back(Address::generate(&env));
+    let family_client = family_wallet::FamilyWalletScenarioClient::new(&env, &family_wallet_id);
+    family_client.seed(&family_wallet::MODE_MISSING, &members);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet_id,
+    );
+
+    let report =
+        client.get_family_spending_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
+
+    assert_eq!(report.total_members, 0);
+    assert_eq!(report.total_spending, 0);
+    assert_eq!(report.average_per_member, 0);
+    assert_eq!(report.data_availability, DataAvailability::Missing);
+    assert_eq!(report.member_breakdown.len(), 0);
+}
+
+#[test]
+fn test_get_family_spending_report_zero_members_maps_to_missing() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1704067200);
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet_id = env.register_contract(None, family_wallet::FamilyWalletScenario);
+    let family_client = family_wallet::FamilyWalletScenarioClient::new(&env, &family_wallet_id);
+    family_client.seed(&family_wallet::MODE_EMPTY, &soroban_sdk::Vec::new(&env));
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet_id,
+    );
+
+    let report =
+        client.get_family_spending_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
+
+    assert_eq!(report.total_members, 0);
+    assert_eq!(report.total_spending, 0);
+    assert_eq!(report.data_availability, DataAvailability::Missing);
+}
+
+#[test]
+fn test_get_family_spending_report_overflow_clamps_and_marks_partial() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1704067200);
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet_id = env.register_contract(None, family_wallet::FamilyWalletScenario);
+    let mut members = soroban_sdk::Vec::new(&env);
+    members.push_back(Address::generate(&env));
+    members.push_back(Address::generate(&env));
+    let family_client = family_wallet::FamilyWalletScenarioClient::new(&env, &family_wallet_id);
+    family_client.seed(&family_wallet::MODE_OVERFLOW, &members);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet_id,
+    );
+
+    let report =
+        client.get_family_spending_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
+
+    assert_eq!(report.total_members, 2);
+    assert_eq!(report.total_spending, i128::MAX);
+    assert_eq!(report.average_per_member, i128::MAX / 2);
+    assert_eq!(report.data_availability, DataAvailability::Partial);
+}
+
+#[test]
+fn test_get_family_spending_report_requires_user_auth() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1704067200);
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet_id = env.register_contract(None, family_wallet::FamilyWalletScenario);
+    let mut members = soroban_sdk::Vec::new(&env);
+    members.push_back(Address::generate(&env));
+    members.push_back(Address::generate(&env));
+    members.push_back(Address::generate(&env));
+    let family_client = family_wallet::FamilyWalletScenarioClient::new(&env, &family_wallet_id);
+    family_client.seed(&family_wallet::MODE_COMPLETE, &members);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet_id,
+    );
+
+    let _ = client.get_family_spending_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
+
+    let auths = env.auths();
+    let found = auths.iter().any(|(addr, _)| *addr == user);
+    assert!(found, "family spending report must require user auth");
+}
+
+#[test]
+fn test_get_family_spending_report_rejects_invalid_period() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let result = client.try_get_family_spending_report(&user, &user, &200, &100);
+    assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
+}
+
+#[test]
+fn test_get_family_spending_report_addresses_not_configured() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let result =
+        client.try_get_family_spending_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
+    assert!(matches!(
+        result,
+        Err(Ok(ReportingError::AddressesNotConfigured))
+    ));
+}
+
+#[test]
+fn test_get_family_spending_report_partial_when_member_pages_exceed_cap() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1704067200);
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet_id =
+        env.register_contract(None, family_wallet_infinite::FamilyWalletInfinite);
+    family_wallet_infinite::FamilyWalletInfiniteClient::new(&env, &family_wallet_id).seed();
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet_id,
+    );
+
+    let report =
+        client.get_family_spending_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
+
+    assert_eq!(
+        report.data_availability,
+        DataAvailability::Partial,
+        "unbounded member paging must yield Partial after MAX_DEP_PAGES"
+    );
+    assert_eq!(
+        report.total_members, MAX_DEP_PAGES,
+        "exactly MAX_DEP_PAGES members must be collected before the cap fires"
+    );
+    assert_eq!(report.total_spending, (MAX_DEP_PAGES as i128) * 10);
+}
+
+#[test]
+fn test_get_family_spending_report_deduplicates_members() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1704067200);
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet_id = env.register_contract(None, family_wallet::FamilyWalletScenario);
+    let member = Address::generate(&env);
+    let mut members = soroban_sdk::Vec::new(&env);
+    members.push_back(member.clone());
+    let family_client = family_wallet::FamilyWalletScenarioClient::new(&env, &family_wallet_id);
+    family_client.seed(&family_wallet::MODE_DUPLICATE_PAGES, &members);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet_id,
+    );
+
+    let report =
+        client.get_family_spending_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
+
+    assert_eq!(report.total_members, 1);
+    assert_eq!(report.total_spending, 100);
+    assert_eq!(report.average_per_member, 100);
+    assert_eq!(report.data_availability, DataAvailability::Complete);
 }
 
 #[test]
@@ -768,9 +1479,192 @@ fn test_calculate_health_score() {
 
     let result = client.try_calculate_health_score(&user, &10000);
     assert!(result.is_ok());
-    let health_score = result.unwrap();
+    let health_score = result.unwrap().unwrap();
 
     assert_eq!(health_score.score, 87);
+}
+
+#[test]
+fn test_calculate_health_score_edge_cases() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_ledger_time(&env, 1, 1704067200);
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet = Address::generate(&env);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet,
+    );
+
+    // Test with zero total target (no goals)
+    // Note: Mock always returns goals, so this tests the calculation with actual goals
+    let health_score = client.calculate_health_score(&user, &0);
+    assert_eq!(health_score.savings_score, 32); // 80% completion -> 32 points
+    assert_eq!(health_score.score, 87); // 32 + 35 + 20
+}
+
+#[test]
+fn test_calculate_health_score_overflow_protection() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_ledger_time(&env, 1, 1704067200);
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    // Register mock contracts with extreme values
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet = Address::generate(&env);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet,
+    );
+
+    // Test should complete without panicking even with extreme inputs
+    let health_score = client.calculate_health_score(&user, &i128::MAX);
+
+    // Scores should be bounded
+    assert!(health_score.score <= 100);
+    assert!(health_score.savings_score <= 40);
+    assert!(health_score.bills_score <= 40);
+    assert!(health_score.insurance_score <= 20);
+}
+
+#[test]
+fn test_calculate_health_score_no_unpaid_bills() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_ledger_time(&env, 1, 1704067200);
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet = Address::generate(&env);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet,
+    );
+
+    let health_score = client.calculate_health_score(&user, &10000);
+
+    // With unpaid bills (none overdue), bills_score should be 35
+    assert_eq!(health_score.bills_score, 35);
+}
+
+#[test]
+fn test_calculate_health_score_no_insurance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_ledger_time(&env, 1, 1704067200);
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet = Address::generate(&env);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet,
+    );
+
+    let health_score = client.calculate_health_score(&user, &10000);
+
+    // With insurance, insurance_score should be 20
+    assert_eq!(health_score.insurance_score, 20);
+}
+
+#[test]
+fn test_calculate_health_score_bounds_guarantee() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_ledger_time(&env, 1, 1704067200);
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet = Address::generate(&env);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet,
+    );
+
+    // Test multiple times to ensure consistency
+    for _ in 0..10 {
+        let health_score = client.calculate_health_score(&user, &10000);
+
+        // All scores must be within bounds
+        assert!(health_score.score <= 100);
+        assert!(health_score.savings_score <= 40);
+        assert!(health_score.bills_score <= 40);
+        assert!(health_score.insurance_score <= 20);
+
+        // Total should equal sum of components
+        assert_eq!(
+            health_score.score,
+            health_score.savings_score + health_score.bills_score + health_score.insurance_score
+        );
+    }
 }
 
 #[test]
@@ -804,9 +1698,15 @@ fn test_get_financial_health_report() {
     let period_start = 1704067200u64;
     let period_end = 1706745600u64;
 
-    let result = client.try_get_financial_health_report(&user, &total_remittance, &period_start, &period_end);
+    let result = client.try_get_financial_health_report(
+        &user,
+        &user,
+        &total_remittance,
+        &period_start,
+        &period_end,
+    );
     assert!(result.is_ok());
-    let report = result.unwrap();
+    let report = result.unwrap().unwrap();
 
     assert_eq!(report.health_score.score, 87);
 }
@@ -819,7 +1719,7 @@ fn test_get_financial_health_report_rejects_invalid_period() {
     let client = ReportingContractClient::new(&env, &contract_id);
     let user = Address::generate(&env);
 
-    let result = client.try_get_financial_health_report(&user, &10_000i128, &200, &100);
+    let result = client.try_get_financial_health_report(&user, &user, &10_000i128, &200, &100);
     assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
 }
 
@@ -839,6 +1739,139 @@ fn test_get_trend_analysis() {
 
     assert_eq!(trend.current_amount, 15000);
     assert_eq!(trend.change_percentage, 50);
+}
+
+fn trend_client(env: &Env) -> (ReportingContractClient<'_>, Address) {
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(env, &contract_id);
+    let user = Address::generate(env);
+    (client, user)
+}
+
+#[test]
+fn test_trend_multi_empty_returns_empty() {
+    let env = create_test_env();
+    let (client, user) = trend_client(&env);
+    let history = soroban_sdk::Vec::new(&env);
+
+    let trends = client.get_trend_analysis_multi(&user, &history);
+
+    assert_eq!(trends.len(), 0);
+}
+
+#[test]
+fn test_trend_multi_single_point_uses_zero_baseline() {
+    let env = create_test_env();
+    let (client, user) = trend_client(&env);
+    let mut history = soroban_sdk::Vec::new(&env);
+    history.push_back((1u64, 250i128));
+
+    let trends = client.get_trend_analysis_multi(&user, &history);
+    let first = trends.get(0).expect("single point produces one trend");
+
+    assert_eq!(trends.len(), 1);
+    assert_eq!(first.current_amount, 250);
+    assert_eq!(first.previous_amount, 0);
+    assert_eq!(first.change_amount, 250);
+    assert_eq!(first.change_percentage, 100);
+}
+
+#[test]
+fn test_trend_multi_zero_previous_amount_does_not_divide_by_zero() {
+    let env = create_test_env();
+    let (client, user) = trend_client(&env);
+    let mut history = soroban_sdk::Vec::new(&env);
+    history.push_back((1u64, 0i128));
+    history.push_back((2u64, 75i128));
+
+    let trends = client.get_trend_analysis_multi(&user, &history);
+    let first = trends.get(0).expect("first trend exists");
+    let second = trends.get(1).expect("second trend exists");
+
+    assert_eq!(first.previous_amount, 0);
+    assert_eq!(first.current_amount, 0);
+    assert_eq!(first.change_percentage, 0);
+    assert_eq!(second.previous_amount, 0);
+    assert_eq!(second.current_amount, 75);
+    assert_eq!(second.change_amount, 75);
+    assert_eq!(second.change_percentage, 100);
+}
+
+#[test]
+fn test_trend_multi_sign_swings_follow_change_direction_for_positive_baseline() {
+    let env = create_test_env();
+    let (client, user) = trend_client(&env);
+    let mut history = soroban_sdk::Vec::new(&env);
+    history.push_back((1u64, -50i128));
+    history.push_back((2u64, 50i128));
+    history.push_back((3u64, -50i128));
+    history.push_back((4u64, 100i128));
+
+    let trends = client.get_trend_analysis_multi(&user, &history);
+    let negative_to_positive = trends.get(1).expect("negative-to-positive trend");
+    let positive_to_negative = trends.get(2).expect("positive-to-negative trend");
+    let negative_to_positive_again = trends.get(3).expect("second negative-to-positive trend");
+
+    assert_eq!(negative_to_positive.previous_amount, -50);
+    assert_eq!(negative_to_positive.current_amount, 50);
+    assert_eq!(negative_to_positive.change_amount, 100);
+    assert_eq!(negative_to_positive.change_percentage, 100);
+
+    assert_eq!(positive_to_negative.previous_amount, 50);
+    assert_eq!(positive_to_negative.current_amount, -50);
+    assert_eq!(positive_to_negative.change_amount, -100);
+    assert_eq!(positive_to_negative.change_percentage, -200);
+
+    assert_eq!(negative_to_positive_again.previous_amount, -50);
+    assert_eq!(negative_to_positive_again.current_amount, 100);
+    assert_eq!(negative_to_positive_again.change_amount, 150);
+    assert_eq!(negative_to_positive_again.change_percentage, 100);
+}
+
+#[test]
+fn test_trend_multi_uses_input_order_for_unsorted_history() {
+    let env = create_test_env();
+    let (client, user) = trend_client(&env);
+    let mut history = soroban_sdk::Vec::new(&env);
+    history.push_back((3u64, 300i128));
+    history.push_back((1u64, 100i128));
+    history.push_back((2u64, 200i128));
+
+    let trends = client.get_trend_analysis_multi(&user, &history);
+
+    assert_eq!(trends.len(), 3);
+    assert_eq!(trends.get(0).unwrap().current_amount, 300);
+    assert_eq!(trends.get(0).unwrap().previous_amount, 0);
+    assert_eq!(trends.get(1).unwrap().current_amount, 100);
+    assert_eq!(trends.get(1).unwrap().previous_amount, 300);
+    assert_eq!(trends.get(1).unwrap().change_percentage, -66);
+    assert_eq!(trends.get(2).unwrap().current_amount, 200);
+    assert_eq!(trends.get(2).unwrap().previous_amount, 100);
+    assert_eq!(trends.get(2).unwrap().change_percentage, 100);
+}
+
+#[test]
+fn test_trend_multi_extreme_values_saturate_without_overflow() {
+    let env = create_test_env();
+    let (client, user) = trend_client(&env);
+    let mut history = soroban_sdk::Vec::new(&env);
+    history.push_back((1u64, i128::MAX));
+    history.push_back((2u64, i128::MIN));
+    history.push_back((3u64, i128::MAX));
+
+    let trends = client.get_trend_analysis_multi(&user, &history);
+    let max_to_min = trends.get(1).expect("max-to-min trend");
+    let min_to_max = trends.get(2).expect("min-to-max trend");
+
+    assert_eq!(max_to_min.previous_amount, i128::MAX);
+    assert_eq!(max_to_min.current_amount, i128::MIN);
+    assert_eq!(max_to_min.change_amount, i128::MIN);
+    assert_eq!(max_to_min.change_percentage, -100);
+
+    assert_eq!(min_to_max.previous_amount, i128::MIN);
+    assert_eq!(min_to_max.current_amount, i128::MAX);
+    assert_eq!(min_to_max.change_amount, i128::MAX);
+    assert_eq!(min_to_max.change_percentage, 100);
 }
 
 #[test]
@@ -872,9 +1905,15 @@ fn test_store_and_retrieve_report() {
     let period_start = 1704067200u64;
     let period_end = 1706745600u64;
 
-    let result = client.try_get_financial_health_report(&user, &total_remittance, &period_start, &period_end);
+    let result = client.try_get_financial_health_report(
+        &user,
+        &user,
+        &total_remittance,
+        &period_start,
+        &period_end,
+    );
     assert!(result.is_ok());
-    let report = result.unwrap();
+    let report = result.unwrap().unwrap();
 
     let period_key = 202401u64;
     let stored = client.store_report(&user, &report, &period_key);
@@ -915,18 +1954,26 @@ fn test_archive_old_reports() {
         &family_wallet,
     );
 
-    let result = client.try_get_financial_health_report(&user, &10000i128, &1704067200u64, &1706745600u64);
+    let result = client.try_get_financial_health_report(
+        &user,
+        &user,
+        &10000i128,
+        &1704067200u64,
+        &1706745600u64,
+    );
     assert!(result.is_ok());
-    let report = result.unwrap();
+    let report = result.unwrap().unwrap();
 
     let period_key = 202401u64;
     client.store_report(&user, &report, &period_key);
 
     let archive_result = client.try_archive_old_reports(&admin, &2000000000);
     assert!(archive_result.is_ok());
-    assert_eq!(archive_result.unwrap(), 1);
+    assert_eq!(archive_result.unwrap().unwrap(), 1);
 
-    assert!(client.get_stored_report(&user, &period_key).is_none());
+    assert!(client
+        .get_stored_report(&user, &user, &period_key)
+        .is_none());
 }
 
 #[test]
@@ -956,9 +2003,15 @@ fn test_cleanup_old_reports() {
         &family_wallet,
     );
 
-    let result = client.try_get_financial_health_report(&user, &10000i128, &1704067200u64, &1706745600u64);
+    let result = client.try_get_financial_health_report(
+        &user,
+        &user,
+        &10000i128,
+        &1704067200u64,
+        &1706745600u64,
+    );
     assert!(result.is_ok());
-    let report = result.unwrap();
+    let report = result.unwrap().unwrap();
     client.store_report(&user, &report, &202401);
 
     let stats = client.get_storage_stats();
@@ -970,7 +2023,7 @@ fn test_cleanup_old_reports() {
 
     let cleanup_result = client.try_cleanup_old_reports(&admin, &2000000000);
     assert!(cleanup_result.is_ok());
-    assert_eq!(cleanup_result.unwrap(), 1);
+    assert_eq!(cleanup_result.unwrap().unwrap(), 1);
 }
 
 /// Regression: `get_storage_stats` must stay aligned with real maps across store → archive → cleanup
@@ -1014,7 +2067,8 @@ fn test_storage_stats_regression_across_archive_and_cleanup_cycles() {
     let base_ts = 1_000_000u64;
     for i in 0..TOTAL {
         set_ledger_time(&env, 10 + i as u32, base_ts + i);
-        let report = client.get_financial_health_report(&user, &10000, &1704067200, &1706745600);
+        let report =
+            client.get_financial_health_report(&user, &user, &10000, &1704067200, &1706745600);
         client.store_report(&user, &report, &(202_400 + i));
     }
 
@@ -1047,7 +2101,7 @@ fn test_storage_stats_regression_across_archive_and_cleanup_cycles() {
 
     // Second cycle: new report increments active; full archive then cleanup returns to zero archived
     set_ledger_time(&env, 700, base_ts + 300);
-    let report = client.get_financial_health_report(&user, &10000, &1704067200, &1706745600);
+    let report = client.get_financial_health_report(&user, &user, &10000, &1704067200, &1706745600);
     client.store_report(&user, &report, &209_912);
 
     let after_new_store = client.get_storage_stats();
@@ -1201,7 +2255,13 @@ fn make_report(
     client: &ReportingContractClient,
     user: &Address,
 ) -> crate::FinancialHealthReport {
-    client.get_financial_health_report(user, &10_000i128, &1_704_067_200u64, &1_706_745_600u64)
+    client.get_financial_health_report(
+        user,
+        user,
+        &10_000i128,
+        &1_704_067_200u64,
+        &1_706_745_600u64,
+    )
 }
 
 // ── store_report authorization ────────────────────────────────────────────────
@@ -1258,14 +2318,14 @@ fn test_store_report_cannot_impersonate_another_user() {
     client.store_report(&user_b, &report_a, &202_401u64);
 
     // user_a's slot must be empty
-    let result_a = client.get_stored_report(&user_a, &202_401u64);
+    let result_a = client.get_stored_report(&user_a, &user_a, &202_401u64);
     assert!(
         result_a.is_none(),
         "user_a's report slot must be empty when stored under user_b"
     );
 
     // user_b's slot has the report
-    let result_b = client.get_stored_report(&user_b, &202_401u64);
+    let result_b = client.get_stored_report(&user_b, &user_b, &202_401u64);
     assert!(
         result_b.is_some(),
         "report stored under user_b must be retrievable by user_b"
@@ -1287,14 +2347,14 @@ fn test_store_report_admin_cannot_bypass_user_auth() {
     client.store_report(&admin, &report, &202_401u64);
 
     // The user's slot must remain empty
-    let user_result = client.get_stored_report(&user, &202_401u64);
+    let user_result = client.get_stored_report(&user, &user, &202_401u64);
     assert!(
         user_result.is_none(),
         "admin storing under their own address must not populate user's slot"
     );
 
     // Admin's own slot has the report
-    let admin_result = client.get_stored_report(&admin, &202_401u64);
+    let admin_result = client.get_stored_report(&admin, &admin, &202_401u64);
     assert!(
         admin_result.is_some(),
         "admin's own report slot must be populated"
@@ -1317,11 +2377,11 @@ fn test_get_stored_report_user_isolation() {
     client.store_report(&user_a, &report_a, &202_401u64);
 
     // user_b queries user_a's period key — must get None
-    let result = client.get_stored_report(&user_a, &202_401u64);
+    let result = client.get_stored_report(&user_a, &user_a, &202_401u64);
     assert!(result.is_some(), "user_a must retrieve their own report");
 
     // Querying with user_b's address for the same period key returns None
-    let result_b = client.get_stored_report(&user_b, &202_401u64);
+    let result_b = client.get_stored_report(&user_b, &user_b, &202_401u64);
     assert!(
         result_b.is_none(),
         "user_b must not see user_a's report — key isolation enforced"
@@ -1345,8 +2405,8 @@ fn test_get_stored_report_same_period_key_different_users() {
     client.store_report(&user_a, &report_a, &period);
     client.store_report(&user_b, &report_b, &period);
 
-    let ra = client.get_stored_report(&user_a, &period).unwrap();
-    let rb = client.get_stored_report(&user_b, &period).unwrap();
+    let ra = client.get_stored_report(&user_a, &user_a, &period).unwrap();
+    let rb = client.get_stored_report(&user_b, &user_b, &period).unwrap();
 
     // Both exist independently
     assert_eq!(ra.generated_at, report_a.generated_at);
@@ -1366,11 +2426,19 @@ fn test_get_stored_report_multiple_periods_same_user() {
     client.store_report(&user, &report, &202_402u64);
     client.store_report(&user, &report, &202_403u64);
 
-    assert!(client.get_stored_report(&user, &202_401u64).is_some());
-    assert!(client.get_stored_report(&user, &202_402u64).is_some());
-    assert!(client.get_stored_report(&user, &202_403u64).is_some());
+    assert!(client
+        .get_stored_report(&user, &user, &202_401u64)
+        .is_some());
+    assert!(client
+        .get_stored_report(&user, &user, &202_402u64)
+        .is_some());
+    assert!(client
+        .get_stored_report(&user, &user, &202_403u64)
+        .is_some());
     // Non-existent period returns None
-    assert!(client.get_stored_report(&user, &202_404u64).is_none());
+    assert!(client
+        .get_stored_report(&user, &user, &202_404u64)
+        .is_none());
 }
 
 /// Overwriting a report for the same (user, period) replaces the previous value.
@@ -1411,7 +2479,7 @@ fn test_store_report_overwrite_replaces_previous() {
     let report_v2 = make_report(&env, &client, &user);
     client.store_report(&user, &report_v2, &period);
 
-    let retrieved = client.get_stored_report(&user, &period).unwrap();
+    let retrieved = client.get_stored_report(&user, &user, &period).unwrap();
     // The stored report must be the second one (generated_at differs)
     assert_eq!(
         retrieved.generated_at, report_v2.generated_at,
@@ -1548,6 +2616,7 @@ fn test_cleanup_old_reports_records_admin_auth() {
 // ── get_archived_reports user isolation ──────────────────────────────────────
 
 /// get_archived_reports only returns reports belonging to the queried user.
+#[allow(deprecated)]
 #[test]
 fn test_get_archived_reports_user_isolation() {
     let env = create_test_env();
@@ -1596,6 +2665,7 @@ fn test_get_archived_reports_user_isolation() {
 }
 
 /// A user with no archived reports gets an empty list.
+#[allow(deprecated)]
 #[test]
 fn test_get_archived_reports_empty_for_unknown_user() {
     let env = create_test_env();
@@ -1618,6 +2688,7 @@ fn test_get_archived_reports_empty_for_unknown_user() {
 }
 
 /// Cleanup removes only the target user's archives, not other users'.
+#[allow(deprecated)]
 #[test]
 fn test_cleanup_does_not_remove_other_users_archives() {
     let env = create_test_env();
@@ -1646,6 +2717,7 @@ fn test_cleanup_does_not_remove_other_users_archives() {
 }
 
 /// Cleanup with a past timestamp removes nothing.
+#[allow(deprecated)]
 #[test]
 fn test_cleanup_past_timestamp_removes_nothing() {
     let env = create_test_env();
@@ -1671,6 +2743,7 @@ fn test_cleanup_past_timestamp_removes_nothing() {
 // ── multi-user storage isolation end-to-end ──────────────────────────────────
 
 /// Full lifecycle: store → archive → cleanup for multiple users with no leakage.
+#[allow(deprecated)]
 #[test]
 fn test_multi_user_full_lifecycle_no_data_leakage() {
     let env = create_test_env();
@@ -1692,8 +2765,8 @@ fn test_multi_user_full_lifecycle_no_data_leakage() {
 
     // Verify isolation before archiving
     for user in &users {
-        assert!(client.get_stored_report(user, &202_401u64).is_some());
-        assert!(client.get_stored_report(user, &202_402u64).is_some());
+        assert!(client.get_stored_report(user, user, &202_401u64).is_some());
+        assert!(client.get_stored_report(user, user, &202_402u64).is_some());
     }
 
     // Archive all
@@ -1705,8 +2778,8 @@ fn test_multi_user_full_lifecycle_no_data_leakage() {
 
     // Active storage must be empty for all users
     for user in &users {
-        assert!(client.get_stored_report(user, &202_401u64).is_none());
-        assert!(client.get_stored_report(user, &202_402u64).is_none());
+        assert!(client.get_stored_report(user, user, &202_401u64).is_none());
+        assert!(client.get_stored_report(user, user, &202_402u64).is_none());
     }
 
     // Each user sees exactly their 2 archived reports
@@ -1752,7 +2825,9 @@ fn test_archive_timestamp_boundary_preserves_recent_reports() {
 
     // Report must still be in active storage
     assert!(
-        client.get_stored_report(&user, &202_401u64).is_some(),
+        client
+            .get_stored_report(&user, &user, &202_401u64)
+            .is_some(),
         "recent report must remain in active storage"
     );
 }
@@ -1805,7 +2880,7 @@ fn test_get_stored_report_missing_key_returns_none() {
     client.init(&admin);
 
     let user = Address::generate(&env);
-    let result = client.get_stored_report(&user, &999_999u64);
+    let result = client.get_stored_report(&user, &user, &999_999u64);
     assert!(
         result.is_none(),
         "missing report must return None, not panic"
@@ -1870,6 +2945,52 @@ fn test_check_dependencies_succeeds_with_configured_contracts() {
         soroban_sdk::String::from_str(&env, "family_wallet")
     );
     assert!(statuses.get(4).unwrap().ok);
+}
+
+#[test]
+fn test_check_dependencies_returns_one_status_per_configured_dependency() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet_id = env.register_contract(None, family_wallet::FamilyWallet);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet_id,
+    );
+
+    let statuses = client.check_dependencies(&admin);
+    let expected_names = [
+        "remittance_split",
+        "savings_goals",
+        "bill_payments",
+        "insurance",
+        "family_wallet",
+    ];
+
+    assert_eq!(statuses.len(), expected_names.len() as u32);
+
+    for (index, expected_name) in expected_names.iter().enumerate() {
+        let status = statuses.get(index as u32).unwrap();
+
+        assert_eq!(
+            status.name,
+            soroban_sdk::String::from_str(&env, expected_name)
+        );
+        assert!(status.ok);
+        assert_eq!(status.error_category, None);
+    }
 }
 
 #[test]
@@ -2036,6 +3157,7 @@ mod bills_infinite {
 // ── Mock: insurance returning exactly 3 pages then cursor = 0 ─────────────
 mod insurance_three_pages {
     use crate::{CoverageType, InsurancePolicy, InsuranceTrait, PolicyPage};
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
 
     #[contract]
@@ -2043,29 +3165,34 @@ mod insurance_three_pages {
 
     #[contractimpl]
     impl InsuranceTrait for InsuranceThreePages {
-        fn get_active_policies(env: Env, owner: Address, cursor: u32, _limit: u32) -> PolicyPage {
+        fn get_active_policies(env: Env, _owner: Address, cursor: u32, _limit: u32) -> PolicyPage {
             let (policy_id, next_cursor) = match cursor {
                 0 => (1u32, 7u32),
                 7 => (2, 14),
                 _ => (3, 0),
             };
             let mut items = Vec::new(&env);
-            items.push_back(InsurancePolicy {
-                id: policy_id,
-                owner,
-                name: SorobanString::from_str(&env, "P"),
-                external_ref: None,
-                coverage_type: CoverageType::Health,
-                monthly_premium: 100,
-                coverage_amount: 10_000,
-                active: true,
-                next_payment_date: 1_735_689_600,
-            });
+            items.push_back(policy_id);
             PolicyPage {
-                count: 1,
+                count: items.len(),
                 items,
                 next_cursor,
             }
+        }
+        fn get_policy(env: Env, policy_id: u32) -> Option<InsurancePolicy> {
+            Some(InsurancePolicy {
+                id: policy_id,
+                owner: Address::generate(&env),
+                name: SorobanString::from_str(&env, "P"),
+                coverage_type: CoverageType::Health,
+                monthly_premium: 100,
+                coverage_amount: 10_000,
+                external_ref: None,
+                active: true,
+                created_at: 0,
+                last_payment_at: 0,
+                next_payment_date: 1_735_689_600,
+            })
         }
         fn get_total_monthly_premium(_env: Env, _owner: Address) -> i128 {
             300
@@ -2076,6 +3203,7 @@ mod insurance_three_pages {
 // ── Mock: insurance that never returns cursor = 0 ─────────────────────────
 mod insurance_infinite {
     use crate::{CoverageType, InsurancePolicy, InsuranceTrait, PolicyPage};
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
 
     #[contract]
@@ -2083,24 +3211,29 @@ mod insurance_infinite {
 
     #[contractimpl]
     impl InsuranceTrait for InsuranceInfinite {
-        fn get_active_policies(env: Env, owner: Address, cursor: u32, _limit: u32) -> PolicyPage {
+        fn get_active_policies(env: Env, _owner: Address, cursor: u32, _limit: u32) -> PolicyPage {
             let mut items = Vec::new(&env);
-            items.push_back(InsurancePolicy {
-                id: cursor,
-                owner,
-                name: SorobanString::from_str(&env, "P"),
-                external_ref: None,
-                coverage_type: CoverageType::Health,
-                monthly_premium: 100,
-                coverage_amount: 10_000,
-                active: true,
-                next_payment_date: 1_735_689_600,
-            });
+            items.push_back(cursor);
             PolicyPage {
-                count: 1,
+                count: items.len(),
                 items,
                 next_cursor: cursor + 1,
             }
+        }
+        fn get_policy(env: Env, policy_id: u32) -> Option<InsurancePolicy> {
+            Some(InsurancePolicy {
+                id: policy_id,
+                owner: Address::generate(&env),
+                name: SorobanString::from_str(&env, "P"),
+                coverage_type: CoverageType::Health,
+                monthly_premium: 100,
+                coverage_amount: 10_000,
+                external_ref: None,
+                active: true,
+                created_at: 0,
+                last_payment_at: 0,
+                next_payment_date: 1_735_689_600,
+            })
         }
         fn get_total_monthly_premium(_env: Env, _owner: Address) -> i128 {
             0
@@ -2114,7 +3247,7 @@ fn setup_paging_test(
     env: &Env,
     bill_payments_id: Address,
     insurance_id: Address,
-) -> (ReportingContractClient, Address) {
+) -> (ReportingContractClient<'_>, Address) {
     let contract_id = env.register_contract(None, ReportingContract);
     let client = ReportingContractClient::new(env, &contract_id);
     let admin = Address::generate(env);
@@ -2147,7 +3280,8 @@ fn test_bill_paging_terminates_at_cursor_zero() {
     let (client, _) = setup_paging_test(&env, bill_id, ins_id);
 
     let user = Address::generate(&env);
-    let report = client.get_bill_compliance_report(&user, &1_704_067_200u64, &1_706_745_600u64);
+    let report =
+        client.get_bill_compliance_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
 
     // All 3 pages fetched — no items are filtered out because created_at == period_start
     assert_eq!(
@@ -2174,7 +3308,8 @@ fn test_bill_paging_terminates_at_cap() {
     let (client, _) = setup_paging_test(&env, bill_id, ins_id);
 
     let user = Address::generate(&env);
-    let report = client.get_bill_compliance_report(&user, &1_704_067_200u64, &1_706_745_600u64);
+    let report =
+        client.get_bill_compliance_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
 
     assert_eq!(
         report.data_availability,
@@ -2201,7 +3336,8 @@ fn test_bill_paging_cursor_monotonicity() {
     let user = Address::generate(&env);
     // Each page delivers exactly 1 bill; 3 pages → 3 bills total.
     // If the loop visited the same page twice, count would differ.
-    let report = client.get_bill_compliance_report(&user, &1_704_067_200u64, &1_706_745_600u64);
+    let report =
+        client.get_bill_compliance_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
     assert_eq!(
         report.total_bills, 3,
         "cursor must advance monotonically so each page is visited exactly once"
@@ -2221,7 +3357,7 @@ fn test_insurance_paging_terminates_at_cursor_zero() {
     let (client, _) = setup_paging_test(&env, bill_id, ins_id);
 
     let user = Address::generate(&env);
-    let report = client.get_insurance_report(&user, &1_704_067_200u64, &1_706_745_600u64);
+    let report = client.get_insurance_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
 
     assert_eq!(
         report.data_availability,
@@ -2247,7 +3383,7 @@ fn test_insurance_paging_terminates_at_cap() {
     let (client, _) = setup_paging_test(&env, bill_id, ins_id);
 
     let user = Address::generate(&env);
-    let report = client.get_insurance_report(&user, &1_704_067_200u64, &1_706_745_600u64);
+    let report = client.get_insurance_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
 
     assert_eq!(
         report.data_availability,
@@ -2272,12 +3408,209 @@ fn test_insurance_paging_cursor_monotonicity() {
     let (client, _) = setup_paging_test(&env, bill_id, ins_id);
 
     let user = Address::generate(&env);
-    let report = client.get_insurance_report(&user, &1_704_067_200u64, &1_706_745_600u64);
+    let report = client.get_insurance_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
     assert_eq!(
         report.active_policies, 3,
         "cursor must advance monotonically so each page is visited exactly once"
     );
     assert_eq!(report.data_availability, DataAvailability::Complete);
+}
+
+mod topn_tie_bills {
+    use crate::{Bill, BillPage, BillPaymentsTrait};
+    use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
+
+    #[contract]
+    pub struct BillsTieAllEqual;
+
+    // Always return 1 page for simplicity.
+    #[contractimpl]
+    impl BillPaymentsTrait for BillsTieAllEqual {
+        fn get_unpaid_bills(_env: Env, _owner: Address, _c: u32, _l: u32) -> BillPage {
+            BillPage {
+                items: Vec::new(&_env),
+                next_cursor: 0,
+                count: 0,
+            }
+        }
+
+        fn get_total_unpaid(_env: Env, _owner: Address) -> i128 {
+            0
+        }
+
+        fn get_all_bills_for_owner(
+            env: Env,
+            owner: Address,
+            _cursor: u32,
+            _limit: u32,
+        ) -> BillPage {
+            // All equal amounts => order must be ID ascending due to tie-break.
+            // Also intentionally insert in descending id order to catch non-determinism.
+            let mut items = Vec::new(&env);
+            let amount: i128 = 100;
+            let ids = [5u32, 4, 3, 2, 1];
+            for id in ids.iter() {
+                items.push_back(Bill {
+                    id: *id,
+                    owner: owner.clone(),
+                    name: SorobanString::from_str(&env, "B"),
+                    external_ref: None,
+                    amount,
+                    due_date: 1_735_689_600,
+                    recurring: false,
+                    frequency_days: 0,
+                    paid: false,
+                    created_at: 1_704_067_200,
+                    paid_at: None,
+                    schedule_id: None,
+                    tags: Vec::new(&env),
+                    currency: SorobanString::from_str(&env, "XLM"),
+                });
+            }
+            BillPage {
+                items,
+                next_cursor: 0,
+                count: ids.len() as u32,
+            }
+        }
+    }
+}
+
+mod topn_tie_savings {
+    use crate::{GoalPage, SavingsGoal, SavingsGoalsTrait};
+    use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
+
+    #[contract]
+    pub struct SavingsTieAllEqual;
+
+    #[contractimpl]
+    impl SavingsGoalsTrait for SavingsTieAllEqual {
+        fn get_all_goals(_env: Env, _owner: Address) -> Vec<SavingsGoal> {
+            // Not used by Top-N path (uses paginated get_goals).
+            Vec::new(&_env)
+        }
+
+        fn get_goals(env: Env, owner: Address, _cursor: u32, _limit: u32) -> GoalPage {
+            // All equal target_amount => order must be ID ascending.
+            let mut items = Vec::new(&env);
+            let target_amount: i128 = 10_000;
+            let ids = [5u32, 4, 3, 2, 1];
+            for id in ids.iter() {
+                items.push_back(SavingsGoal {
+                    id: *id,
+                    owner: owner.clone(),
+                    name: SorobanString::from_str(&env, "G"),
+                    target_amount,
+                    current_amount: 1_000,
+                    target_date: 1_735_689_600,
+                    locked: false,
+                    unlock_date: None,
+                    tags: Vec::new(&env),
+                });
+            }
+            GoalPage {
+                items,
+                next_cursor: 0,
+                count: ids.len() as u32,
+            }
+        }
+
+        fn is_goal_completed(_env: Env, _goal_id: u32) -> bool {
+            false
+        }
+    }
+}
+
+#[test]
+fn test_top_n_reports_tie_break_is_deterministic_bills() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1704067200);
+
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, topn_tie_bills::BillsTieAllEqual);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet = Address::generate(&env);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet,
+    );
+
+    let period_start = 1704067200u64;
+    let period_end = 1706745600u64;
+
+    let r1 = client.get_top_bills_report(&user, &period_start, &period_end);
+    let r2 = client.get_top_bills_report(&user, &period_start, &period_end);
+    assert!(r1.items.len() <= crate::MAX_ITEMS_PER_REPORT);
+
+    // Deterministic across repeated calls.
+    assert_eq!(r1.items.len(), r2.items.len());
+    for i in 0..r1.items.len() {
+        assert_eq!(r1.items.get(i).unwrap().id, r2.items.get(i).unwrap().id);
+    }
+
+    // All amounts equal => order by id ascending => [1,2,3,4,5] capped to MAX.
+    // Our mock returns 5 items; MAX is 10, so all 5 should be present.
+    let expected_ids = [1u32, 2, 3, 4, 5];
+    assert_eq!(r1.items.len(), expected_ids.len() as u32);
+    for (i, expected) in expected_ids.iter().enumerate() {
+        assert_eq!(r1.items.get(i as u32).unwrap().id, *expected);
+    }
+}
+
+#[test]
+fn test_top_n_reports_tie_break_is_deterministic_savings() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1704067200);
+
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, topn_tie_savings::SavingsTieAllEqual);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet = Address::generate(&env);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet,
+    );
+
+    let period_start = 1704067200u64;
+    let period_end = 1706745600u64;
+
+    let r1 = client.get_top_savings_report(&user, &period_start, &period_end);
+    let r2 = client.get_top_savings_report(&user, &period_start, &period_end);
+
+    assert_eq!(r1.items.len(), r2.items.len());
+    for i in 0..r1.items.len() {
+        assert_eq!(r1.items.get(i).unwrap().id, r2.items.get(i).unwrap().id);
+    }
+
+    let expected_ids = [1u32, 2, 3, 4, 5];
+    assert_eq!(r1.items.len(), expected_ids.len() as u32);
+    for (i, expected) in expected_ids.iter().enumerate() {
+        assert_eq!(r1.items.get(i as u32).unwrap().id, *expected);
+    }
 }
 
 #[test]
