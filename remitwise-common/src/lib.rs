@@ -786,6 +786,12 @@ impl ToI128Checked for i32 {
 /// so that integer arithmetic can be used without floating point.
 pub const BASIS_POINTS: u32 = 10_000;
 
+/// Basis points per whole percentage point (1% = 100 bps).
+pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
+
+/// Alias for `BASIS_POINTS_PER_PERCENT` for brevity in arithmetic.
+pub const BPS_PER_PERCENT: u32 = BASIS_POINTS_PER_PERCENT;
+
 /// Supported units for externally supplied rate inputs.
 ///
 /// Remitwise contracts currently accept only basis points. Treating a raw rate
@@ -937,6 +943,17 @@ impl Rate {
     #[inline(always)]
     pub fn to_bps(self) -> u32 {
         self.0
+    }
+
+    /// Create a `Rate` from a whole percentage value.
+    ///
+    /// Returns `Ok(Rate)` if `percent * 100` fits in `u32`, or `Err(RateError::Overflow)` otherwise.
+    #[inline(always)]
+    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
+        percent
+            .checked_mul(BPS_PER_PERCENT)
+            .map(Self)
+            .ok_or(RateError::Overflow)
     }
 
     /// Convert this rate back to a whole percentage integer value, truncating fractional basis points.
@@ -1365,6 +1382,33 @@ pub fn require_stable_currency(env: &Env, symbol: &Symbol) -> Result<(), StableC
         }
     }
     Err(StableCurrencyError::UnsupportedCurrency)
+}
+
+/// Alias for [`require_stable_currency`] with a name that clearly signals
+/// its purpose as an inbound-token ingress guard.
+///
+/// Use this at entry points that receive tokens from external callers
+/// (e.g., deposit, payment, remittance entry points) to reject rebase,
+/// deflationary, or elastic-supply tokens that could silently alter balances
+/// during transfer and violate contract invariants.
+///
+/// # Threat model
+/// Without this guard, an attacker could deposit a rebase/deflationary token
+/// (e.g., AMPL, OHM, TIME) that changes balance on transfer. The contract
+/// would record the nominal amount but the actual value received could differ,
+/// breaking settlement invariants (remittance splits, bill payments, insurance
+/// payouts, savings goals).
+///
+/// # Arguments
+/// * `env` - The Soroban environment
+/// * `symbol` - The currency symbol to validate (case-insensitive, whitespace trimmed)
+///
+/// # Returns
+/// * `Ok(())` if the symbol is a recognized stable currency
+/// * `Err(StableCurrencyError::UnsupportedCurrency)` if the symbol is not recognized
+#[inline(always)]
+pub fn require_supported_currency(env: &Env, symbol: &Symbol) -> Result<(), StableCurrencyError> {
+    require_stable_currency(env, symbol)
 }
 
 /// Compare a Symbol case-insensitively against a known ASCII currency string.
@@ -1926,6 +1970,33 @@ mod stable_currency_tests {
         let sym = Symbol::new(&env, "");
         assert_eq!(
             require_stable_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    #[test]
+    fn require_supported_currency_accepts_usdc() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "USDC");
+        assert_eq!(super::require_supported_currency(&env, &sym), Ok(()));
+    }
+
+    #[test]
+    fn require_supported_currency_rejects_rebase_token() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "AMPL");
+        assert_eq!(
+            super::require_supported_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    #[test]
+    fn require_supported_currency_rejects_unknown_token() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "RANDOM");
+        assert_eq!(
+            super::require_supported_currency(&env, &sym),
             Err(StableCurrencyError::UnsupportedCurrency)
         );
     }
