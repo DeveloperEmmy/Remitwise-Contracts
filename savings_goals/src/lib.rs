@@ -149,6 +149,7 @@ pub enum DataKey {
     TagIndex(Address, String),   // Persistent: Vec<u32> (goal ids by owner & canonicalized tag)
     PauseAdmin,                  // Instance: Address
     Paused,                      // Instance: bool
+    PausedSince,                 // Instance: u64
     PausedFunctions,             // Instance: Map<Symbol, bool>
     UnpauseAt,                   // Instance: u64
     UpgradeAdmin,                // Instance: Address
@@ -446,6 +447,9 @@ impl SavingsGoalContract {
             panic!("Unauthorized");
         }
         env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedSince, &env.ledger().timestamp());
         env.events().publish(
             (
                 symbol_short!("savings"),
@@ -472,6 +476,7 @@ impl SavingsGoalContract {
             env.storage().instance().remove(&DataKey::UnpauseAt);
         }
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().remove(&DataKey::PausedSince);
         env.events().publish(
             (
                 symbol_short!("savings"),
@@ -516,6 +521,21 @@ impl SavingsGoalContract {
 
     pub fn is_paused(env: Env) -> bool {
         Self::get_global_paused(&env)
+    }
+
+    pub fn get_paused_since(env: Env) -> Option<u64> {
+        if Self::is_paused(env.clone()) {
+            env.storage().instance().get(&DataKey::PausedSince)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_pause_state(env: Env) -> remitwise_common::PauseState {
+        remitwise_common::PauseState {
+            paused: Self::is_paused(env.clone()),
+            paused_since: Self::get_paused_since(env),
+        }
     }
 
     pub fn get_version(env: Env) -> u32 {

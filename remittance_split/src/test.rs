@@ -2545,3 +2545,39 @@ fn test_update_split_percentages_invalid_sum() {
         Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100))
     );
 }
+
+#[test]
+fn test_paused_since_and_pause_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    client.initialize_split(&owner, &0, &token_addr, &4_000, &3_000, &2_000, &1_000);
+
+    assert_eq!(client.get_paused_since(), None);
+    let initial_state = client.get_pause_state();
+    assert!(!initial_state.paused);
+    assert_eq!(initial_state.paused_since, None);
+
+    let now = 5_000u64;
+    set_time(&env, now);
+    client.pause(&owner);
+
+    assert_eq!(client.get_paused_since(), Some(now));
+    let paused_state = client.get_pause_state();
+    assert!(paused_state.paused);
+    assert_eq!(paused_state.paused_since, Some(now));
+
+    client.unpause(&owner);
+
+    assert_eq!(client.get_paused_since(), None);
+    let unpaused_state = client.get_pause_state();
+    assert!(!unpaused_state.paused);
+    assert_eq!(unpaused_state.paused_since, None);
+}

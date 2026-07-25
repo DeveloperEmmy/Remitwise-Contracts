@@ -53,6 +53,14 @@ pub enum PolicyMode {
     Strict = 1,
 }
 
+/// Detailed pause state including boolean status and timestamp when paused.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PauseState {
+    pub paused: bool,
+    pub paused_since: Option<u64>,
+}
+
 /// Event categories used for logging across all contracts.
 ///
 /// Determines the high-level classification of an event. The taxonomy is documented in
@@ -121,6 +129,9 @@ pub const CONTRACT_VERSION: u32 = 1;
 
 /// Storage key for the pause channels map
 pub const STORAGE_PAUSE_CHANNELS: &str = "PAUSE_CH";
+
+/// Storage key for the global paused_since timestamp
+pub const STORAGE_PAUSED_AT: &str = "PAUSED_AT";
 
 /// Maximum batch size for operations
 pub const MAX_BATCH_SIZE: u32 = 50;
@@ -828,6 +839,9 @@ pub enum RateError {
     Overflow,
 }
 
+pub const BPS_PER_PERCENT: u32 = 100;
+pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
+
 /// A whole percentage value (1% = 100 basis points).
 ///
 /// `Percent` wraps a `u32` representing whole percentage units. Safe conversions
@@ -921,6 +935,14 @@ impl Rate {
     #[inline(always)]
     pub fn from_bps(bps: u32) -> Self {
         Self(bps)
+    }
+
+    /// Create a `Rate` from a whole percentage integer value.
+    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
+        percent
+            .checked_mul(BPS_PER_PERCENT)
+            .map(Self::from_bps)
+            .ok_or(RateError::Overflow)
     }
 
     /// Construct a `Rate` from an externally supplied raw value plus unit.
@@ -1325,17 +1347,7 @@ pub enum StableCurrencyError {
 /// This is a defence-in-depth allowlist of well-known stablecoins.
 /// Rebase/deflationary/elastic-supply tokens (e.g., AMPL, OHM, TIME) are intentionally excluded.
 const STABLE_CURRENCIES: &[&str] = &[
-    "USDC",
-    "USDT",
-    "USDP",
-    "BUSD",
-    "GUSD",
-    "TUSD",
-    "USDD",
-    "EURC",
-    "EURS",
-    "DAI",
-    "XLM",
+    "USDC", "USDT", "USDP", "BUSD", "GUSD", "TUSD", "USDD", "EURC", "EURS", "DAI", "XLM",
 ];
 
 /// Validates that a currency symbol represents a supported stable asset.

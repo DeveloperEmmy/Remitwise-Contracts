@@ -4,10 +4,9 @@
 use remitwise_common::reversible_op::{BillPaymentsReversible, ReversibleOpError};
 use remitwise_common::{
     check_and_increment_rate_limit, clamp_limit, require_stable_currency, EventCategory,
-    EventPriority, RemitwiseEvents, Timestamp, ARCHIVE_BUMP_AMOUNT,
-    ARCHIVE_LIFETIME_THRESHOLD, CONTRACT_VERSION, DEFAULT_CURRENCY,
-    INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD, MAX_BATCH_SIZE, MAX_CURRENCY_LEN,
-    SNAPSHOT_KEY, SNAPSHOT_VERSION,
+    EventPriority, RemitwiseEvents, Timestamp, ARCHIVE_BUMP_AMOUNT, ARCHIVE_LIFETIME_THRESHOLD,
+    CONTRACT_VERSION, DEFAULT_CURRENCY, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD,
+    MAX_BATCH_SIZE, MAX_CURRENCY_LEN, SNAPSHOT_KEY, SNAPSHOT_VERSION,
 };
 
 use soroban_sdk::{
@@ -206,7 +205,7 @@ pub enum BillPaymentsError {
     /// The page is empty so there is no first item to return.
     EmptyPage = 29,
     /// Bill or schedule name is invalid (empty or exceeds max length)
-    InvalidName = 30
+    InvalidName = 30,
 }
 
 pub type Error = BillPaymentsError;
@@ -714,8 +713,7 @@ impl BillPayments {
         // Defence-in-depth: reject rebase/deflationary tokens.
         // After normalizing to uppercase, verify the symbol is a recognized stable asset.
         let sym = Symbol::new(env, upper_str);
-        require_stable_currency(env, &sym)
-            .map_err(|_| BillPaymentsError::UnsupportedCurrency)?;
+        require_stable_currency(env, &sym).map_err(|_| BillPaymentsError::UnsupportedCurrency)?;
 
         Ok(String::from_str(env, upper_str))
     }
@@ -922,6 +920,9 @@ impl BillPayments {
         env.storage()
             .instance()
             .set(&symbol_short!("PAUSED"), &true);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("PAUSED_AT"), &env.ledger().timestamp());
         // Cancel any pending unpause schedule to prevent timelock bypass
         env.storage().instance().remove(&symbol_short!("UNP_AT"));
         RemitwiseEvents::emit(
@@ -957,6 +958,7 @@ impl BillPayments {
         env.storage()
             .instance()
             .set(&symbol_short!("PAUSED"), &false);
+        env.storage().instance().remove(&symbol_short!("PAUSED_AT"));
         RemitwiseEvents::emit(
             &env,
             EventCategory::System,
@@ -1047,6 +1049,9 @@ impl BillPayments {
         env.storage()
             .instance()
             .set(&symbol_short!("PAUSED"), &true);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("PAUSED_AT"), &env.ledger().timestamp());
         env.storage().instance().remove(&symbol_short!("UNP_AT"));
         RemitwiseEvents::emit(
             &env,
@@ -1088,6 +1093,19 @@ impl BillPayments {
 
     pub fn is_paused(env: Env) -> bool {
         Self::get_global_paused(&env)
+    }
+    pub fn get_paused_since(env: Env) -> Option<u64> {
+        if Self::is_paused(env.clone()) {
+            env.storage().instance().get(&symbol_short!("PAUSED_AT"))
+        } else {
+            None
+        }
+    }
+    pub fn get_pause_state(env: Env) -> remitwise_common::PauseState {
+        remitwise_common::PauseState {
+            paused: Self::is_paused(env.clone()),
+            paused_since: Self::get_paused_since(env),
+        }
     }
     pub fn is_function_paused_public(env: Env, func: Symbol) -> bool {
         Self::is_function_paused(&env, func)

@@ -29,10 +29,12 @@ A common crate containing shared types, enums, and constants used across multipl
 - `FamilyRole`: Access control roles (Owner, Admin, Member, Viewer)
 - `CoverageType`: Insurance coverage types (Health, Life, Property, Auto, Liability)
 - `EventCategory` & `EventPriority`: Event logging categories and priorities
+- `PauseState`: Structured pause state carrying `paused: bool` and `paused_since: Option<u64>` for analytics
 
 **Shared Constants:**
 - Pagination limits (`DEFAULT_PAGE_LIMIT`, `MAX_PAGE_LIMIT`)
 - Storage TTL values (`INSTANCE_LIFETIME_THRESHOLD`, `ARCHIVE_LIFETIME_THRESHOLD`, etc.)
+- Pause storage key (`STORAGE_PAUSED_AT`)
 - Contract versioning (`CONTRACT_VERSION`)
 - Batch operation limits (`MAX_BATCH_SIZE`)
 

@@ -9,8 +9,8 @@ mod test;
 mod tests_safe_math;
 
 use remitwise_common::{
-    clamp_limit, guard_bytes_len, verify_no_dust, EventCategory, EventPriority,
-    RemitwiseEvents, Timestamp, ToI128Checked, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD,
+    clamp_limit, guard_bytes_len, verify_no_dust, EventCategory, EventPriority, RemitwiseEvents,
+    Timestamp, ToI128Checked, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD,
     PERSISTENT_BUMP_AMOUNT, PERSISTENT_LIFETIME_THRESHOLD, SNAPSHOT_KEY, SNAPSHOT_VERSION,
 };
 use soroban_sdk::{
@@ -434,6 +434,9 @@ impl RemittanceSplit {
         env.storage()
             .instance()
             .set(&symbol_short!("PAUSED"), &true);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("PAUSED_AT"), &env.ledger().timestamp());
         RemitwiseEvents::emit(
             &env,
             EventCategory::System,
@@ -472,6 +475,7 @@ impl RemittanceSplit {
         env.storage()
             .instance()
             .set(&symbol_short!("PAUSED"), &false);
+        env.storage().instance().remove(&symbol_short!("PAUSED_AT"));
         RemitwiseEvents::emit(
             &env,
             EventCategory::System,
@@ -486,6 +490,19 @@ impl RemittanceSplit {
     }
     pub fn is_paused(env: Env) -> bool {
         Self::get_global_paused(&env)
+    }
+    pub fn get_paused_since(env: Env) -> Option<u64> {
+        if Self::is_paused(env.clone()) {
+            env.storage().instance().get(&symbol_short!("PAUSED_AT"))
+        } else {
+            None
+        }
+    }
+    pub fn get_pause_state(env: Env) -> remitwise_common::PauseState {
+        remitwise_common::PauseState {
+            paused: Self::is_paused(env.clone()),
+            paused_since: Self::get_paused_since(env),
+        }
     }
     pub fn get_version(env: Env) -> u32 {
         Self::extend_instance_ttl(&env);

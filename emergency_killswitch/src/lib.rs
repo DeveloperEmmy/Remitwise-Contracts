@@ -20,6 +20,7 @@ pub enum Error {
 enum DataKey {
     Admin,
     GlobalPaused,
+    PausedSince,
     ModulePaused(Symbol),
     PausedFunctions(Symbol),
     UnpauseSchedule,
@@ -99,6 +100,9 @@ impl EmergencyKillswitch {
             .ok_or(Error::NotInitialized)?;
         admin.require_auth();
         env.storage().instance().set(&DataKey::GlobalPaused, &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedSince, &env.ledger().timestamp());
         env.storage().instance().remove(&DataKey::UnpauseSchedule);
         env.events().publish(
             (
@@ -129,6 +133,7 @@ impl EmergencyKillswitch {
             return Err(Error::Unauthorized);
         }
         env.storage().instance().set(&DataKey::GlobalPaused, &false);
+        env.storage().instance().remove(&DataKey::PausedSince);
         env.storage().instance().remove(&DataKey::UnpauseSchedule);
         env.events().publish(
             (
@@ -169,6 +174,7 @@ impl EmergencyKillswitch {
             .ok_or(Error::NotInitialized)?;
         admin.require_auth();
         env.storage().instance().set(&DataKey::GlobalPaused, &false);
+        env.storage().instance().remove(&DataKey::PausedSince);
         env.storage().instance().remove(&DataKey::UnpauseSchedule);
         env.events().publish(
             (
@@ -204,6 +210,21 @@ impl EmergencyKillswitch {
             .instance()
             .get(&DataKey::GlobalPaused)
             .unwrap_or(false)
+    }
+
+    pub fn get_paused_since(env: Env) -> Option<u64> {
+        if Self::is_paused(env.clone()) {
+            env.storage().instance().get(&DataKey::PausedSince)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_pause_state(env: Env) -> remitwise_common::PauseState {
+        remitwise_common::PauseState {
+            paused: Self::is_paused(env.clone()),
+            paused_since: Self::get_paused_since(env),
+        }
     }
 
     /// Returns the pending unpause timestamp set by `schedule_unpause`, or `None` if no unpause
@@ -500,6 +521,36 @@ mod tests {
         // transfer_admin to the contract's own address
         let res = client.try_transfer_admin(&contract_id);
         assert_eq!(res, Err(Ok(Error::InvalidAdmin)));
+    }
+
+    #[test]
+    fn test_paused_since_and_pause_state() {
+        let (env, client) = setup_env();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(client.get_paused_since(), None);
+        let initial_state = client.get_pause_state();
+        assert!(!initial_state.paused);
+        assert_eq!(initial_state.paused_since, None);
+
+        let now = 1_000_000u64;
+        env.ledger().with_mut(|li| li.timestamp = now);
+        client.pause();
+
+        assert_eq!(client.get_paused_since(), Some(now));
+        let paused_state = client.get_pause_state();
+        assert!(paused_state.paused);
+        assert_eq!(paused_state.paused_since, Some(now));
+
+        client.schedule_unpause(&(now + 100));
+        env.ledger().with_mut(|li| li.timestamp = now + 200);
+        client.unpause();
+
+        assert_eq!(client.get_paused_since(), None);
+        let unpaused_state = client.get_pause_state();
+        assert!(!unpaused_state.paused);
+        assert_eq!(unpaused_state.paused_since, None);
     }
 
     /// Verify DataKey::Admin value is updated by checking a second transfer
