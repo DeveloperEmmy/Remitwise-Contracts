@@ -337,6 +337,7 @@ To run an example, use `cargo run --example <example_name>`:
 - [Frontend Integration Notes](docs/frontend-integration.md)
 - [String and Bytes Canonicalisation](docs/CANONICALISATION.md) - Tag casefold, currency trim/uppercase, external-ref charset, and migration checksum byte-order
 - [Type-Safe Percent Conversion](docs/type-safe-percent-conversion.md) - Converting whole percentages to basis points with checked overflow arithmetic
+- [Gas Unit Costs Reference](docs/GAS_UNIT_COSTS.md) - Per-instruction CPU/memory/ledger-I/O costs, network limits, and per-contract benchmark table
 - [Storage Layout Reference](STORAGE_LAYOUT.md)
 - [Contract Specs & Migrations](docs/MIGRATIONS.md) - How to bump a contract spec without breaking existing storage
 - [Event Indexer](indexer/README.md) - Off-chain event indexing and querying
@@ -661,6 +662,7 @@ After verifying optimizations:
 ### Documentation
 
 - **[Benchmarking Guide](benchmarks/README.md)**: Complete benchmarking documentation
+- **[Gas Unit Costs Reference](docs/GAS_UNIT_COSTS.md)**: Per-operation CPU/memory costs, fee formulas, and current network parameters
 - **[Gas Tuning Guide](docs/GAS_TUNING.md)**: How to interpret gas snapshots and optimize costs
 - **[Gas Optimization Guide](docs/gas-optimization.md)**: Optimization strategies and best practices
 - **[Baseline Results](benchmarks/baseline.json)**: Current performance baseline
