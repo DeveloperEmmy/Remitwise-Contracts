@@ -776,6 +776,47 @@ impl ToI128Checked for i32 {
     }
 }
 
+/// Normalizes a `soroban_sdk::String` into a `Symbol` by stripping leading/trailing
+/// whitespace and lowercasing ASCII letters.
+pub fn canonicalise_symbol(env: &Env, input: &soroban_sdk::String) -> Symbol {
+    let len = input.len();
+    if len == 0 {
+        panic!("symbol input must contain between 1 and 32 characters after trimming");
+    }
+    let mut buf = [0u8; 256];
+    if len as usize > buf.len() {
+        panic!("symbol input is too long");
+    }
+    input.copy_into_slice(&mut buf[..len as usize]);
+
+    let s = core::str::from_utf8(&buf[..len as usize])
+        .unwrap_or_else(|_| panic!("symbol input is not valid UTF-8"));
+
+    let trimmed = s.trim();
+    let trimmed_len = trimmed.len();
+    if trimmed_len == 0 {
+        panic!("symbol input must contain at least one non-whitespace character");
+    }
+    if trimmed_len > 32 {
+        panic!("symbol input must contain between 1 and 32 characters after trimming");
+    }
+
+    let trimmed_bytes = trimmed.as_bytes();
+    let mut canonical = [0u8; 32];
+    for (i, &byte) in trimmed_bytes.iter().enumerate() {
+        canonical[i] = if byte.is_ascii_uppercase() {
+            byte.to_ascii_lowercase()
+        } else {
+            byte
+        };
+    }
+
+    let canonical_str = core::str::from_utf8(&canonical[..trimmed_len])
+        .unwrap_or_else(|_| panic!("canonicalised symbol is not valid UTF-8"));
+
+    Symbol::new(env, canonical_str)
+}
+
 // ---------------------------------------------------------------------------
 // Rate newtype — basis-points arithmetic
 // ---------------------------------------------------------------------------
@@ -785,6 +826,10 @@ impl ToI128Checked for i32 {
 /// All Remitwise contracts express percentages in basis points (1 bps = 0.01%)
 /// so that integer arithmetic can be used without floating point.
 pub const BASIS_POINTS: u32 = 10_000;
+
+/// Basis points per whole percentage point (1% = 100 bps).
+pub const BPS_PER_PERCENT: u32 = 100;
+pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
 
 /// Supported units for externally supplied rate inputs.
 ///
@@ -921,6 +966,22 @@ impl Rate {
     #[inline(always)]
     pub fn from_bps(bps: u32) -> Self {
         Self(bps)
+    }
+
+    /// Create a `Rate` from a whole percentage value.
+    ///
+    /// Returns `Ok(Rate)` if `percent * 100` fits in `u32`, or `Err(RateError::Overflow)` otherwise.
+    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
+        percent
+            .checked_mul(BPS_PER_PERCENT)
+            .map(Self::from_bps)
+            .ok_or(RateError::Overflow)
+    }
+
+    /// Create a `Rate` from a `Percent` newtype instance.
+    #[inline(always)]
+    pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
+        percent.to_rate()
     }
 
     /// Construct a `Rate` from an externally supplied raw value plus unit.
@@ -1325,17 +1386,7 @@ pub enum StableCurrencyError {
 /// This is a defence-in-depth allowlist of well-known stablecoins.
 /// Rebase/deflationary/elastic-supply tokens (e.g., AMPL, OHM, TIME) are intentionally excluded.
 const STABLE_CURRENCIES: &[&str] = &[
-    "USDC",
-    "USDT",
-    "USDP",
-    "BUSD",
-    "GUSD",
-    "TUSD",
-    "USDD",
-    "EURC",
-    "EURS",
-    "DAI",
-    "XLM",
+    "USDC", "USDT", "USDP", "BUSD", "GUSD", "TUSD", "USDD", "EURC", "EURS", "DAI", "XLM",
 ];
 
 /// Validates that a currency symbol represents a supported stable asset.
@@ -1448,7 +1499,6 @@ impl RemitwiseEvents {
 
         #[cfg(test)]
         {
-            use soroban_sdk::xdr::ToXdr;
             use soroban_sdk::TryFromVal;
             let val: soroban_sdk::Val = data.into_val(env);
             if let Ok(sc_val) = soroban_sdk::xdr::ScVal::try_from_val(env, &val) {

@@ -19,8 +19,11 @@ use super::*;
 use crate::distribute_pro_rata;
 use ed25519_dalek::Signer;
 use proptest::prelude::*;
-use soroban_sdk::{Bytes, Env, IntoVal, String, Symbol, Vec};
+use soroban_sdk::testutils::{Ledger, LedgerInfo};
+use soroban_sdk::{Env, String, Symbol, Vec};
+use std::string::ToString;
 
+#[allow(dead_code)]
 fn set_ledger(env: &Env, sequence_number: u32) {
     let proto = env.ledger().protocol_version();
     env.ledger().set(LedgerInfo {
@@ -667,6 +670,89 @@ fn test_timestamp_seconds_until_u64_max_boundary() {
     assert_eq!(Timestamp::seconds_until(u64::MAX - 1, u64::MAX), 1);
 }
 
+// ─── Current, Future, Past Temporal Tests (Timestamp & validate_period) ──────
+
+/// validate_period returns Ok when start equals end (current/same timestamp).
+#[test]
+fn test_validate_period_returns_ok_for_current_timestamp_equal_start_end() {
+    assert_eq!(validate_period(1_700_000_000, 1_700_000_000), Ok(()));
+}
+
+/// validate_period returns Ok when start is before end (future end timestamp).
+#[test]
+fn test_validate_period_returns_ok_for_future_end_timestamp() {
+    assert_eq!(validate_period(1_700_000_000, 1_700_000_500), Ok(()));
+}
+
+/// validate_period returns Err(TimeError::InvalidPeriod) when start is after end (past end timestamp).
+#[test]
+fn test_validate_period_returns_err_invalid_period_for_past_end_timestamp() {
+    assert_eq!(
+        validate_period(1_700_000_500, 1_700_000_000),
+        Err(TimeError::InvalidPeriod)
+    );
+}
+
+/// validate_period boundary checks for 1 second difference (future vs past).
+#[test]
+fn test_validate_period_boundary_one_second_future_and_past() {
+    let now = 1_700_000_000;
+    // 1 second in the future is valid
+    assert_eq!(validate_period(now, now + 1), Ok(()));
+    // 1 second in the past relative to start is invalid
+    assert_eq!(validate_period(now + 1, now), Err(TimeError::InvalidPeriod));
+}
+
+/// Timestamp::seconds_until explicit classification across current, future, and past.
+#[test]
+fn test_timestamp_seconds_until_current_future_past_boundaries() {
+    let now = 1_700_000_000;
+    // Current (now == target)
+    assert_eq!(Timestamp::seconds_until(now, now), 0);
+    // Future (now < target)
+    assert_eq!(Timestamp::seconds_until(now, now + 100), 100);
+    // Past (now > target)
+    assert_eq!(Timestamp::seconds_until(now + 100, now), 0);
+}
+
+proptest! {
+    /// Property test pinning `Timestamp::seconds_until` behavior across current, future, and past targets.
+    #[test]
+    fn proptest_timestamp_seconds_until_current_future_past(
+        now in any::<u64>(),
+        target in any::<u64>(),
+    ) {
+        let result = Timestamp::seconds_until(now, target);
+        if target > now {
+            // Future target: returns exact positive distance
+            prop_assert_eq!(result, target - now);
+            prop_assert!(result > 0);
+        } else if target == now {
+            // Current target: returns zero
+            prop_assert_eq!(result, 0);
+        } else {
+            // Past target: saturates at zero
+            prop_assert_eq!(result, 0);
+        }
+    }
+
+    /// Property test pinning `validate_period` behavior across current, future, and past ordering.
+    #[test]
+    fn proptest_validate_period_current_future_past(
+        start in any::<u64>(),
+        end in any::<u64>(),
+    ) {
+        let res = validate_period(start, end);
+        if start <= end {
+            // Current (start == end) or Future (start < end) range: valid
+            prop_assert_eq!(res, Ok(()));
+        } else {
+            // Past (start > end) range: invalid period error
+            prop_assert_eq!(res, Err(TimeError::InvalidPeriod));
+        }
+    }
+}
+
 // ─── verify_signature tests ──────────────────────────────────────────────────
 
 #[test]
@@ -833,7 +919,7 @@ fn distributes_indivisible_total_with_remainder_to_last_bucket() {
     assert_eq!(out[0], 50); // 100 * 50 / 100 = 50
     assert_eq!(out[1], 30); // 100 * 30 / 100 = 30
     assert_eq!(out[2], 15); // 100 * 15 / 100 = 15
-    assert_eq!(out[3], 5);  // 100 * 5 / 100 = 5, plus remainder 0
+    assert_eq!(out[3], 5); // 100 * 5 / 100 = 5, plus remainder 0
 
     // Conservation: sum equals input total
     assert_eq!(out.iter().sum::<i128>(), 100);
@@ -847,9 +933,9 @@ fn distributes_amount_with_non_zero_remainder_to_last_bucket() {
     // Allocated: 3 + 3 = 6, remainder: 10 - 6 = 4 goes to last bucket
     distribute_pro_rata(10, &[3333, 3333, 3334], 10_000, &mut out);
 
-    assert_eq!(out[0], 3);  // floor(10 * 3333 / 10000) = 3
-    assert_eq!(out[1], 3);  // floor(10 * 3333 / 10000) = 3
-    assert_eq!(out[2], 4);  // 10 - 3 - 3 = 4 (includes remainder)
+    assert_eq!(out[0], 3); // floor(10 * 3333 / 10000) = 3
+    assert_eq!(out[1], 3); // floor(10 * 3333 / 10000) = 3
+    assert_eq!(out[2], 4); // 10 - 3 - 3 = 4 (includes remainder)
 
     // Conservation
     assert_eq!(out.iter().sum::<i128>(), 10);
@@ -884,7 +970,7 @@ fn distributes_evenly_divisible_total_exactly() {
     assert_eq!(out[0], 500_000); // 1M * 5000 / 10000
     assert_eq!(out[1], 300_000); // 1M * 3000 / 10000
     assert_eq!(out[2], 150_000); // 1M * 1500 / 10000
-    assert_eq!(out[3], 50_000);  // 1M * 500 / 10000
+    assert_eq!(out[3], 50_000); // 1M * 500 / 10000
 
     // Conservation
     assert_eq!(out.iter().sum::<i128>(), 1_000_000);
@@ -926,7 +1012,7 @@ fn distributes_with_zero_weight_recipient() {
     assert_eq!(out[0], 50);
     assert_eq!(out[1], 30);
     assert_eq!(out[2], 20);
-    assert_eq!(out[3], 0);  // zero weight → receives only remainder (0 in this case)
+    assert_eq!(out[3], 0); // zero weight → receives only remainder (0 in this case)
 
     // Conservation
     assert_eq!(out.iter().sum::<i128>(), 100);
@@ -955,10 +1041,10 @@ fn distributes_using_basis_points_denomination() {
     // 5% = 500 bps, 3% = 300 bps, 1.5% = 150 bps, 0.5% = 50 bps
     distribute_pro_rata(1_000_000, &[500, 300, 150, 50], 10_000, &mut out);
 
-    assert_eq!(out[0], 50_000);  // 5%
-    assert_eq!(out[1], 30_000);  // 3%
-    assert_eq!(out[2], 15_000);  // 1.5%
-    assert_eq!(out[3], 5_000);   // 0.5%
+    assert_eq!(out[0], 50_000); // 5%
+    assert_eq!(out[1], 30_000); // 3%
+    assert_eq!(out[2], 15_000); // 1.5%
+    assert_eq!(out[3], 5_000); // 0.5%
 
     // Conservation
     assert_eq!(out.iter().sum::<i128>(), 100_000); // only 10% of total distributed
@@ -998,7 +1084,7 @@ proptest! {
         total in 0i128..=i128::MAX / 1_000_000, // Avoid overflow in intermediate products
         weights in proptest::collection::vec(1u32..=1000u32, 1..=10),
     ) {
-        let total_weight: u32 = weights.iter().map(|&w| w as u32).sum();
+        let total_weight: u32 = weights.iter().copied().sum();
         if total_weight == 0 {
             return Ok(()); // Skip invalid input
         }
@@ -1016,7 +1102,7 @@ proptest! {
 
         // Property 3: Last bucket receives at least its floor share (absorbs remainder)
         let last_idx = weights.len() - 1;
-        let last_floor = (total as i128)
+        let last_floor = total
             .saturating_mul(weights[last_idx] as i128)
             .saturating_div(total_weight as i128);
         prop_assert!(
@@ -1035,14 +1121,8 @@ proptest! {
 
 #[test]
 fn test_require_supported_rate_unit_accepts_basis_points() {
-    assert_eq!(
-        require_supported_rate_unit(1),
-        Ok(RateUnit::BasisPoints)
-    );
-    assert_eq!(
-        Rate::try_from_input(500, 1),
-        Ok(Rate::from_bps(500))
-    );
+    assert_eq!(require_supported_rate_unit(1), Ok(RateUnit::BasisPoints));
+    assert_eq!(Rate::try_from_input(500, 1), Ok(Rate::from_bps(500)));
 }
 
 #[test]
@@ -1212,21 +1292,21 @@ fn test_canonicalize_tags_checked_does_not_panic_on_injected_special_chars() {
 fn test_require_active_pause_channel_uninitialized() {
     let env = Env::default();
     // Map doesn't exist yet, should not panic
-    crate::require_active_pause_channel(&env, soroban_sdk::Symbol::short("PAYMENTS"));
+    crate::require_active_pause_channel(&env, symbol_short!("PAYMENTS"));
 }
 
 #[test]
 fn test_require_active_pause_channel_active() {
     let env = Env::default();
     let mut map = soroban_sdk::Map::<soroban_sdk::Symbol, bool>::new(&env);
-    map.set(soroban_sdk::Symbol::short("PAYMENTS"), false);
+    map.set(symbol_short!("PAYMENTS"), false);
     env.storage().instance().set(
         &soroban_sdk::Symbol::new(&env, crate::STORAGE_PAUSE_CHANNELS),
         &map,
     );
 
     // Channel is active (false), should not panic
-    crate::require_active_pause_channel(&env, soroban_sdk::Symbol::short("PAYMENTS"));
+    crate::require_active_pause_channel(&env, symbol_short!("PAYMENTS"));
 }
 
 #[test]
@@ -1234,14 +1314,14 @@ fn test_require_active_pause_channel_active() {
 fn test_require_active_pause_channel_paused() {
     let env = Env::default();
     let mut map = soroban_sdk::Map::<soroban_sdk::Symbol, bool>::new(&env);
-    map.set(soroban_sdk::Symbol::short("PAYMENTS"), true);
+    map.set(symbol_short!("PAYMENTS"), true);
     env.storage().instance().set(
         &soroban_sdk::Symbol::new(&env, crate::STORAGE_PAUSE_CHANNELS),
         &map,
     );
 
     // Channel is paused (true), should panic
-    crate::require_active_pause_channel(&env, soroban_sdk::Symbol::short("PAYMENTS"));
+    crate::require_active_pause_channel(&env, symbol_short!("PAYMENTS"));
 }
 
 // ============================================================================
