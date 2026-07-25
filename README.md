@@ -323,6 +323,7 @@ To run an example, use `cargo run --example <example_name>`:
 - [Changelog](CHANGELOG.md) - Conventional-commits-style log of every release
 - [Token Decimal Catalogue](docs/DECIMAL_CATALOGUE.md) - Reference table of decimals expected for each canonical token
 - [Authorization Matrix](docs/AUTHORIZATION_MATRIX.md) - Per-entrypoint caller authorization requirements for all contracts
+- [Pagination Handbook](docs/PAGINATION_HANDBOOK.md) - How every paginated read is structured, cursor semantics, reviewer checklist, and implementation guide
 - [Pause Playbook](docs/PAUSE_PLAYBOOK.md) - Emergency pause mechanisms and recovery procedures for operators
 - [Committed Hashes](docs/COMMITTED_HASHES.md) - Request-hash coverage and verification guidance for downstream integrators
 - [Zero-Amount Policy](docs/ZERO_AMOUNT_POLICY.md) - Which entrypoints reject, accept, or normalize zero amounts; quick reference for integrators
