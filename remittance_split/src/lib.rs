@@ -1068,6 +1068,11 @@ impl RemittanceSplit {
             return Err(RemittanceSplitError::UnsupportedTokenContract);
         }
 
+        if let Err(_e) = Self::validate_supported_token_contract(&env, &usdc_contract) {
+            Self::append_audit(&env, symbol_short!("init"), &owner, false);
+            return Err(RemittanceSplitError::UnsupportedTokenContract);
+        }
+
         Self::extend_instance_ttl(&env);
 
         let config = SplitConfig {
