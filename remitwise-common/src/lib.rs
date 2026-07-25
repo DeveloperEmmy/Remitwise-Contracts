@@ -1191,6 +1191,62 @@ pub fn verify_slash_signature(
     Ok(())
 }
 
+/// Validates and canonicalizes a single symbol string.
+///
+/// Trims leading, trailing, and surrounding whitespace. Converts ASCII uppercase to lowercase.
+/// Allows only ASCII lowercase, digits, and underscores.
+/// Panics if the input contains invalid characters, is empty, or exceeds 32 bytes after trimming.
+pub fn canonicalise_symbol(env: &soroban_sdk::Env, input: &soroban_sdk::String) -> soroban_sdk::Symbol {
+    let len = input.len();
+    if len == 0 {
+        panic!("symbol input must contain between 1 and 32 characters");
+    }
+    
+    // We expect the untrimmed input to be small enough.
+    // If it's over 128 bytes, we can safely panic since a valid symbol is at most 32 bytes.
+    let actual_len = len as usize;
+    if actual_len > 128 {
+        panic!("symbol input must contain between 1 and 32 characters");
+    }
+    
+    let mut buf = [0u8; 128];
+    input.copy_into_slice(&mut buf[..actual_len]);
+
+    let mut start = 0;
+    while start < actual_len && buf[start] == b' ' {
+        start += 1;
+    }
+    
+    let mut end = actual_len;
+    while end > start && buf[end - 1] == b' ' {
+        end -= 1;
+    }
+    
+    if start == end {
+        panic!("non-whitespace character");
+    }
+    
+    let trimmed_len = end - start;
+    if trimmed_len == 0 || trimmed_len > 32 {
+        panic!("symbol input must contain between 1 and 32 characters");
+    }
+    
+    let mut out_buf = [0u8; 32];
+    for i in 0..trimmed_len {
+        let mut b = buf[start + i];
+        if b.is_ascii_uppercase() {
+            b += b'a' - b'A';
+        }
+        if !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
+            panic!("invalid Symbol character");
+        }
+        out_buf[i] = b;
+    }
+    
+    let s = core::str::from_utf8(&out_buf[..trimmed_len]).unwrap();
+    soroban_sdk::Symbol::new(env, s)
+}
+
 /// Validates and canonicalizes a batch of tags without panicking.
 ///
 /// # Rules
