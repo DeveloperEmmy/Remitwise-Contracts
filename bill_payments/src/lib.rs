@@ -877,7 +877,16 @@ impl BillPayments {
         new_admin: Address,
     ) -> Result<(), BillPaymentsError> {
         caller.require_auth();
+        
+        // Defense-in-depth: Validate admin grant TTL before allowing admin changes
+        // Prevents bypass of the 30-day admin grant expiration mechanism
         let current = Self::get_pause_admin(&env);
+        if current.is_some() {
+            // Only enforce TTL validation when there's an existing admin
+            // (first-time setup when current is None is allowed to proceed)
+            Self::require_admin_grant_valid(&env)?;
+        }
+        
         match current {
             Option::None => {
                 if caller != new_admin {

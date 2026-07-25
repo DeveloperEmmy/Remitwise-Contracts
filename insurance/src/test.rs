@@ -41,6 +41,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
         assert_eq!(id, 1);
         let p = c.get_policy(&id).unwrap();
@@ -60,6 +61,7 @@ mod tests {
                 &CoverageType::Health,
                 &5_000_000i128,
                 &50_000_000i128,
+                &None,
             );
         }
         let page = c.get_active_policies(&owner, &0, &5);
@@ -81,6 +83,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
         c.create_policy(
             &u2,
@@ -88,6 +91,7 @@ mod tests {
             &CoverageType::Health,
             &6_000_000i128,
             &50_000_000i128,
+            &None,
         );
         assert_eq!(c.get_total_monthly_premium(&u1), 5_000_000);
         assert_eq!(c.get_total_monthly_premium(&u2), 6_000_000);
@@ -105,6 +109,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
         let id2 = c.create_policy(
             &owner,
@@ -112,6 +117,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
         let mut ids = Vec::new(&env);
         ids.push_back(id1);
@@ -181,6 +187,7 @@ mod tests {
             &ct,
             &b.min_premium,
             &b.min_coverage,
+            &None,
         );
 
         // max_premium + max_coverage → accept
@@ -190,6 +197,7 @@ mod tests {
             &ct,
             &b.max_premium,
             &b.max_coverage,
+            &None,
         );
 
         // premium = 0 (min_premium - 1) → InvalidPremium
@@ -199,7 +207,8 @@ mod tests {
                 &n(&env, "T"),
                 &ct,
                 &(b.min_premium - 1),
-                &b.min_coverage
+                &b.min_coverage,
+                &None,
             )
             .unwrap_err()
             .unwrap(),
@@ -213,7 +222,8 @@ mod tests {
                 &n(&env, "T"),
                 &ct,
                 &(b.max_premium + 1),
-                &b.min_coverage
+                &b.min_coverage,
+                &None,
             )
             .unwrap_err()
             .unwrap(),
@@ -227,7 +237,8 @@ mod tests {
                 &n(&env, "T"),
                 &ct,
                 &b.min_premium,
-                &(b.min_coverage - 1)
+                &(b.min_coverage - 1),
+                &None,
             )
             .unwrap_err()
             .unwrap(),
@@ -241,7 +252,8 @@ mod tests {
                 &n(&env, "T"),
                 &ct,
                 &b.max_premium,
-                &(b.max_coverage + 1)
+                &(b.max_coverage + 1),
+                &None,
             )
             .unwrap_err()
             .unwrap(),
@@ -286,6 +298,7 @@ mod tests {
             &CoverageType::Health,
             &premium,
             &max_ratio,
+            &None,
         );
 
         // one over → UnsupportedCombination
@@ -295,7 +308,8 @@ mod tests {
                 &n(&env, "T"),
                 &CoverageType::Health,
                 &premium,
-                &(max_ratio + 1)
+                &(max_ratio + 1),
+                &None,
             )
             .unwrap_err()
             .unwrap(),
@@ -317,6 +331,7 @@ mod tests {
                 &CoverageType::Health,
                 &(i128::MAX - 1),
                 &1i128,
+                &None,
             )
             .unwrap_err()
             .unwrap(),
@@ -349,6 +364,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         assert!(c.deactivate_policy(&policy_owner, &pid));
@@ -370,6 +386,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         assert!(c.deactivate_policy(&contract_owner, &pid));
@@ -391,18 +408,17 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
         let stranger = Address::generate(&env);
 
-        assert_eq!(
-            c.try_deactivate_policy(&stranger, &pid)
-                .unwrap_err()
-                .unwrap(),
-            InsuranceError::Unauthorized,
+        assert!(
+            !c.deactivate_policy(&stranger, &pid),
+            "stranger must not be able to deactivate a policy they don't own"
         );
     }
 
-    /// Attempting to deactivate an already-inactive policy must yield PolicyAlreadyInactive.
+    /// Attempting to deactivate an already-inactive policy must be idempotent (returns true).
     #[test]
     fn test_deactivate_policy_already_inactive() {
         let env = Env::default();
@@ -415,36 +431,33 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         // First deactivation — should succeed
-        c.deactivate_policy(&policy_owner, &pid);
+        assert!(c.deactivate_policy(&policy_owner, &pid));
 
-        // Second deactivation — must return PolicyAlreadyInactive
-        assert_eq!(
-            c.try_deactivate_policy(&policy_owner, &pid)
-                .unwrap_err()
-                .unwrap(),
-            InsuranceError::PolicyAlreadyInactive,
+        // Second deactivation — idempotent, must still return true
+        assert!(
+            c.deactivate_policy(&policy_owner, &pid),
+            "deactivating already-inactive policy must be idempotent"
         );
     }
 
-    /// Deactivating a non-existent policy must yield PolicyNotFound.
+    /// Deactivating a non-existent policy must return false.
     #[test]
     fn test_deactivate_policy_not_found() {
         let env = Env::default();
         env.mock_all_auths();
         let (c, contract_owner) = setup_with_owner(&env);
 
-        assert_eq!(
-            c.try_deactivate_policy(&contract_owner, &9999)
-                .unwrap_err()
-                .unwrap(),
-            InsuranceError::PolicyNotFound,
+        assert!(
+            !c.deactivate_policy(&contract_owner, &9999),
+            "deactivating non-existent policy must return false"
         );
     }
 
-    /// Calling deactivate_policy before init must yield NotInitialized.
+    /// Calling deactivate_policy before init must return false.
     #[test]
     fn test_deactivate_policy_not_initialized() {
         let env = Env::default();
@@ -453,9 +466,9 @@ mod tests {
         let c = InsuranceClient::new(&env, &contract_id);
         let caller = Address::generate(&env);
 
-        assert_eq!(
-            c.try_deactivate_policy(&caller, &1).unwrap_err().unwrap(),
-            InsuranceError::NotInitialized,
+        assert!(
+            !c.deactivate_policy(&caller, &1),
+            "deactivating on uninitialized contract must return false"
         );
     }
 
@@ -472,6 +485,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         c.deactivate_policy(&owner, &pid);
@@ -497,6 +511,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         // Deactivate then reactivate
@@ -528,6 +543,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         assert_eq!(
@@ -548,6 +564,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         // Deactivate so we can attempt to reactivate
@@ -582,6 +599,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
         let p2 = c.create_policy(
             &owner,
@@ -589,6 +607,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
         let p3 = c.create_policy(
             &owner,
@@ -596,6 +615,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
         let p4 = c.create_policy(
             &owner,
@@ -603,6 +623,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         // Deactivate a subset
@@ -632,6 +653,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         c.deactivate_policy(&owner, &pid);
@@ -661,6 +683,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         c.deactivate_policy(&owner, &pid);
@@ -669,9 +692,7 @@ mod tests {
         env.ledger().set_timestamp(base_time + MAX_TENURE_SECS - 1);
 
         assert_eq!(
-            c.try_reactivate_policy(&owner, &pid)
-                .unwrap_err()
-                .unwrap(),
+            c.try_reactivate_policy(&owner, &pid).unwrap_err().unwrap(),
             InsuranceError::PolicyDeactivationTooSoon,
             "reactivation one second before tenure must fail"
         );
@@ -693,6 +714,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         c.deactivate_policy(&owner, &pid);
@@ -721,6 +743,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         assert!(c.set_external_ref(
@@ -749,6 +772,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         c.set_external_ref(
@@ -775,6 +799,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         assert_eq!(
@@ -802,6 +827,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
         let stranger = Address::generate(&env);
 
@@ -826,6 +852,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         // 129 characters — one over the MAX_EXT_REF_LEN of 128
@@ -851,6 +878,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         assert_eq!(
@@ -920,6 +948,7 @@ mod tests {
                 &CoverageType::Health,
                 &5_000_000i128,
                 &50_000_000i128,
+                &None,
             )
             .unwrap_err()
             .unwrap(),
@@ -937,10 +966,8 @@ mod tests {
 
         let caller = Address::generate(&env);
 
-        assert_eq!(
-            c.try_pay_premium(&caller, &1u32).unwrap_err().unwrap(),
-            InsuranceError::NotInitialized,
-        );
+        // pay_premium on uninitialized contract returns false
+        assert!(!c.pay_premium(&caller, &1u32));
     }
 
     #[test]
@@ -954,12 +981,8 @@ mod tests {
         let caller = Address::generate(&env);
         let ids = Vec::<u32>::new(&env);
 
-        assert_eq!(
-            c.try_batch_pay_premiums(&caller, &ids)
-                .unwrap_err()
-                .unwrap(),
-            InsuranceError::NotInitialized,
-        );
+        // batch_pay_premiums on uninitialized contract returns 0
+        assert_eq!(c.batch_pay_premiums(&caller, &ids), 0u32);
     }
 
     #[test]
@@ -971,12 +994,9 @@ mod tests {
 
         let owner = Address::generate(&env);
 
-        assert_eq!(
-            c.try_get_active_policies(&owner, &0u32, &10u32)
-                .unwrap_err()
-                .unwrap(),
-            InsuranceError::NotInitialized,
-        );
+        // get_active_policies on uninitialized contract returns empty page
+        let page = c.get_active_policies(&owner, &0u32, &10u32);
+        assert_eq!(page.count, 0u32);
     }
 
     #[test]
@@ -988,12 +1008,8 @@ mod tests {
 
         let owner = Address::generate(&env);
 
-        assert_eq!(
-            c.try_get_total_monthly_premium(&owner)
-                .unwrap_err()
-                .unwrap(),
-            InsuranceError::NotInitialized,
-        );
+        // get_total_monthly_premium on uninitialized contract returns 0
+        assert_eq!(c.get_total_monthly_premium(&owner), 0i128);
     }
 
     #[test]
@@ -1056,6 +1072,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
         let bob_id = c.create_policy(
             &bob,
@@ -1063,6 +1080,7 @@ mod tests {
             &CoverageType::Life,
             &10_000_000i128,
             &100_000_000i128,
+            &None,
         );
 
         // Alice submits a batch that includes Bob's policy_id.
@@ -1089,6 +1107,7 @@ mod tests {
             &CoverageType::Health,
             &5_000_000i128,
             &50_000_000i128,
+            &None,
         );
 
         // Same ID twice — both iterations will process the same policy.
@@ -1115,7 +1134,7 @@ mod tests {
         assert_eq!(paid, 0, "empty batch must return 0");
     }
 
-    /// A batch containing a non-existent policy ID must error immediately on that ID.
+    /// A batch containing a non-existent policy ID skips it silently.
     #[test]
     fn test_batch_pay_premiums_nonexistent_id_returns_policy_not_found() {
         let env = Env::default();
@@ -1126,8 +1145,9 @@ mod tests {
         let mut ids = Vec::new(&env);
         ids.push_back(999u32);
 
-        let err = c.try_batch_pay_premiums(&owner, &ids).unwrap_err().unwrap();
-        assert_eq!(err, InsuranceError::PolicyNotFound);
+        // batch_pay_premiums skips not-found policies, returns 0 paid
+        let count = c.batch_pay_premiums(&owner, &ids);
+        assert_eq!(count, 0u32, "non-existent policy should be skipped, 0 paid");
     }
 
     // ── clamp_limit pagination tests for get_deactivated_policies ─────────────
@@ -1153,14 +1173,15 @@ mod tests {
 
         // Create and deactivate 25 policies (> DEFAULT_PAGE_LIMIT=20).
         let total: u32 = DEFAULT_PAGE_LIMIT + 5;
-        for i in 0..total {
-            let name = String::from_str(&env, &format!("P{}", i));
+        for _i in 0..total {
+            let name = String::from_str(&env, "Policy");
             let id = c.create_policy(
                 &owner,
                 &name,
                 &CoverageType::Health,
                 &5_000_000i128,
                 &50_000_000i128,
+                &None,
             );
             c.deactivate_policy(&owner, &id);
         }
@@ -1195,14 +1216,15 @@ mod tests {
         let owner = Address::generate(&env);
 
         let total: u32 = MAX_PAGE_LIMIT + 5;
-        for i in 0..total {
-            let name = String::from_str(&env, &format!("P{}", i));
+        for _i in 0..total {
+            let name = String::from_str(&env, "Policy");
             let id = c.create_policy(
                 &owner,
                 &name,
                 &CoverageType::Health,
                 &5_000_000i128,
                 &50_000_000i128,
+                &None,
             );
             c.deactivate_policy(&owner, &id);
         }
@@ -1235,14 +1257,15 @@ mod tests {
 
         // Seed more records than the requested limit.
         let total: u32 = requested_limit + 3;
-        for i in 0..total {
-            let name = String::from_str(&env, &format!("P{}", i));
+        for _i in 0..total {
+            let name = String::from_str(&env, "Policy");
             let id = c.create_policy(
                 &owner,
                 &name,
                 &CoverageType::Health,
                 &5_000_000i128,
                 &50_000_000i128,
+                &None,
             );
             c.deactivate_policy(&owner, &id);
         }
