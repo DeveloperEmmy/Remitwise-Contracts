@@ -961,25 +961,36 @@ pub enum SignatureError {
     VerificationFailed = 3,
     /// The verifier public key has not been registered for attestation verification.
     UnregisteredVerifier = 4,
+    /// The verifier public key was registered under a different Stellar network
+    /// (e.g. Testnet) than the one this contract instance is currently running on.
+    VerifierNetworkMismatch = 5,
 }
 
 /// Storage key for the set of registered verifier public keys.
 const REGISTERED_VERIFIERS_KEY: Symbol = symbol_short!("REGVER");
 
 /// Registers a verifier public key so its attestations may be consumed.
+///
+/// The public key is bound to `env.ledger().network_id()` (the SHA-256 hash of
+/// the network passphrase) at registration time. This prevents a verifier key
+/// that was only ever intended to be trusted on one Stellar network (for
+/// example a "test signer" key provisioned for Testnet QA) from silently
+/// becoming trusted on another network (for example Public/Mainnet) if the
+/// underlying storage entry is ever copied or replayed across deployments —
+/// see [`require_registered_verifier`].
 pub fn register_verifier(env: &Env, public_key: &[u8]) -> Result<(), SignatureError> {
     let pk_arr: [u8; 32] = public_key
         .try_into()
         .map_err(|_| SignatureError::InvalidPublicKeyLength)?;
     let key = BytesN::<32>::from_array(env, &pk_arr);
 
-    let mut registered_verifiers: Map<BytesN<32>, bool> = env
+    let mut registered_verifiers: Map<BytesN<32>, BytesN<32>> = env
         .storage()
         .instance()
         .get(&REGISTERED_VERIFIERS_KEY)
         .unwrap_or_else(|| Map::new(env));
 
-    registered_verifiers.set(key, true);
+    registered_verifiers.set(key, env.ledger().network_id());
     env.storage()
         .instance()
         .set(&REGISTERED_VERIFIERS_KEY, &registered_verifiers);
@@ -987,24 +998,32 @@ pub fn register_verifier(env: &Env, public_key: &[u8]) -> Result<(), SignatureEr
     Ok(())
 }
 
-/// Requires the supplied verifier public key to be registered before an external
-/// attestation can be consumed.
+/// Requires the supplied verifier public key to be registered, and registered
+/// under the network this contract instance is currently executing on, before
+/// an external attestation can be consumed.
+///
+/// # Errors
+/// * [`SignatureError::UnregisteredVerifier`] if the key was never registered.
+/// * [`SignatureError::VerifierNetworkMismatch`] if the key was registered
+///   under a different network than the current one (see [`register_verifier`]).
 pub fn require_registered_verifier(env: &Env, public_key: &[u8]) -> Result<(), SignatureError> {
     let pk_arr: [u8; 32] = public_key
         .try_into()
         .map_err(|_| SignatureError::InvalidPublicKeyLength)?;
     let key = BytesN::<32>::from_array(env, &pk_arr);
 
-    let registered_verifiers: Map<BytesN<32>, bool> = env
+    let registered_verifiers: Map<BytesN<32>, BytesN<32>> = env
         .storage()
         .instance()
         .get(&REGISTERED_VERIFIERS_KEY)
         .unwrap_or_else(|| Map::new(env));
 
-    if registered_verifiers.get(key).unwrap_or(false) {
-        Ok(())
-    } else {
-        Err(SignatureError::UnregisteredVerifier)
+    match registered_verifiers.get(key) {
+        Some(registered_network_id) if registered_network_id == env.ledger().network_id() => {
+            Ok(())
+        }
+        Some(_) => Err(SignatureError::VerifierNetworkMismatch),
+        None => Err(SignatureError::UnregisteredVerifier),
     }
 }
 
