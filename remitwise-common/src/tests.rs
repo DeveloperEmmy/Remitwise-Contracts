@@ -1335,3 +1335,72 @@ proptest! {
         prop_assert_eq!(p.to_bps(), Ok(pct * 100));
     }
 }
+
+// ---------------------------------------------------------------------------
+// require_matching_ledger tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn require_matching_ledger_returns_ok_when_ledger_matches() {
+    let env = Env::default();
+    set_ledger(&env, 100);
+    assert_eq!(require_matching_ledger(&env, 100), Ok(()));
+}
+
+#[test]
+fn require_matching_ledger_returns_err_when_current_is_higher() {
+    // Ascending: ledger has advanced past expected
+    let env = Env::default();
+    set_ledger(&env, 200);
+    assert_eq!(
+        require_matching_ledger(&env, 100),
+        Err(LedgerError::LedgerMismatch)
+    );
+}
+
+#[test]
+fn require_matching_ledger_returns_err_when_current_is_lower() {
+    // Descending: ledger is behind expected
+    let env = Env::default();
+    set_ledger(&env, 50);
+    assert_eq!(
+        require_matching_ledger(&env, 100),
+        Err(LedgerError::LedgerMismatch)
+    );
+}
+
+#[test]
+fn require_matching_ledger_works_at_boundaries() {
+    let env = Env::default();
+
+    set_ledger(&env, 0);
+    assert_eq!(require_matching_ledger(&env, 0), Ok(()));
+    assert_eq!(
+        require_matching_ledger(&env, 1),
+        Err(LedgerError::LedgerMismatch)
+    );
+
+    set_ledger(&env, u32::MAX);
+    assert_eq!(require_matching_ledger(&env, u32::MAX), Ok(()));
+    assert_eq!(
+        require_matching_ledger(&env, u32::MAX - 1),
+        Err(LedgerError::LedgerMismatch)
+    );
+}
+
+proptest! {
+    #[test]
+    fn proptest_require_matching_ledger(
+        expected in any::<u32>(),
+        current in any::<u32>(),
+    ) {
+        let env = Env::default();
+        set_ledger(&env, current);
+        let result = require_matching_ledger(&env, expected);
+        if expected == current {
+            prop_assert_eq!(result, Ok(()));
+        } else {
+            prop_assert_eq!(result, Err(LedgerError::LedgerMismatch));
+        }
+    }
+}
