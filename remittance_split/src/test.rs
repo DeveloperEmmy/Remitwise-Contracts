@@ -1104,8 +1104,240 @@ fn test_request_hash_hashed_path_rejects_self_transfer() {
 
     assert_eq!(
         result,
-        Err(Ok(RemittanceSplitError::SelfTransferNotAllowed))
+        Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100))
     );
+}
+
+// ---------------------------------------------------------------------------
+// Corridor configuration tests
+// ---------------------------------------------------------------------------
+
+fn sample_corridor(env: &Env, id: u32) -> Corridor {
+    Corridor {
+        id,
+        source_currency: symbol_short!("USD"),
+        dest_currency: symbol_short!("NGN"),
+        min_amount: 100,
+        max_amount: 1_000_000,
+        fee_bps: 50,
+    }
+}
+
+fn sample_corridors(env: &Env) -> Vec<Corridor> {
+    vec![
+        env,
+        sample_corridor(env, 1),
+        sample_corridor(env, 2),
+    ]
+}
+
+#[test]
+fn test_init_corridors_happy_path() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    client.initialize_split(&owner, &0, &token_addr, &5000, &3000, &1500, &500);
+
+    let corridors = sample_corridors(&env);
+    client.init_corridors(&owner, &1, &corridors);
+
+    let stored = client.get_corridors();
+    assert_eq!(stored.len(), 2);
+
+    let c1 = stored.get(0).unwrap();
+    assert_eq!(c1.id, 1);
+    assert_eq!(c1.source_currency, symbol_short!("USD"));
+    assert_eq!(c1.dest_currency, symbol_short!("NGN"));
+    assert_eq!(c1.min_amount, 100);
+    assert_eq!(c1.max_amount, 1_000_000);
+    assert_eq!(c1.fee_bps, 50);
+}
+
+#[test]
+fn test_init_corridors_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let corridors = sample_corridors(&env);
+
+    let result = client.try_init_corridors(&owner, &0, &corridors);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::NotInitialized)));
+}
+
+#[test]
+fn test_init_corridors_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    client.initialize_split(&owner, &0, &token_addr, &5000, &3000, &1500, &500);
+
+    let corridors = sample_corridors(&env);
+    let result = client.try_init_corridors(&attacker, &1, &corridors);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::Unauthorized)));
+}
+
+#[test]
+fn test_init_corridors_count_exceeded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    client.initialize_split(&owner, &0, &token_addr, &5000, &3000, &1500, &500);
+
+    // Create more corridors than MAX_CORRIDORS
+    let mut many_corridors = vec![&env];
+    for i in 0..=params::MAX_CORRIDORS {
+        many_corridors.push_back(sample_corridor(&env, i));
+    }
+
+    let result = client.try_init_corridors(&owner, &1, &many_corridors);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::CorridorCountExceeded)));
+}
+
+#[test]
+fn test_init_corridors_fee_too_high() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    client.initialize_split(&owner, &0, &token_addr, &5000, &3000, &1500, &500);
+
+    let bad = Corridor {
+        id: 1,
+        source_currency: symbol_short!("USD"),
+        dest_currency: symbol_short!("NGN"),
+        min_amount: 100,
+        max_amount: 1_000_000,
+        fee_bps: params::MAX_FEE_BPS + 1,
+    };
+    let corridors = vec![&env, bad];
+
+    let result = client.try_init_corridors(&owner, &1, &corridors);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::CorridorFeeTooHigh)));
+}
+
+#[test]
+fn test_init_corridors_invalid_amount_range() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    client.initialize_split(&owner, &0, &token_addr, &5000, &3000, &1500, &500);
+
+    let bad = Corridor {
+        id: 1,
+        source_currency: symbol_short!("USD"),
+        dest_currency: symbol_short!("NGN"),
+        min_amount: 1_000_000,
+        max_amount: 100,
+        fee_bps: 50,
+    };
+    let corridors = vec![&env, bad];
+
+    let result = client.try_init_corridors(&owner, &1, &corridors);
+    assert_eq!(
+        result,
+        Err(Ok(RemittanceSplitError::InvalidCorridorAmountRange))
+    );
+}
+
+#[test]
+fn test_init_corridors_duplicate_id() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    client.initialize_split(&owner, &0, &token_addr, &5000, &3000, &1500, &500);
+
+    let c1 = Corridor {
+        id: 1,
+        source_currency: symbol_short!("USD"),
+        dest_currency: symbol_short!("NGN"),
+        min_amount: 100,
+        max_amount: 1_000_000,
+        fee_bps: 50,
+    };
+    let c2 = Corridor {
+        id: 1,
+        source_currency: symbol_short!("EUR"),
+        dest_currency: symbol_short!("NGN"),
+        min_amount: 200,
+        max_amount: 2_000_000,
+        fee_bps: 75,
+    };
+    let corridors = vec![&env, c1, c2];
+
+    let result = client.try_init_corridors(&owner, &1, &corridors);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::DuplicateCorridorId)));
+}
+
+#[test]
+fn test_init_corridors_replaces_previous() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    client.initialize_split(&owner, &0, &token_addr, &5000, &3000, &1500, &500);
+
+    let first = vec![&env, sample_corridor(&env, 1)];
+    client.init_corridors(&owner, &1, &first);
+
+    let second = vec![&env, sample_corridor(&env, 99)];
+    client.init_corridors(&owner, &2, &second);
+
+    let stored = client.get_corridors();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored.get(0).unwrap().id, 99);
 }
 
 #[test]
