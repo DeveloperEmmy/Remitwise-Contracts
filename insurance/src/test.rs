@@ -1257,4 +1257,260 @@ mod tests {
             "next_cursor must be non-zero when more pages remain"
         );
     }
+
+    // ── MAX_POLICIES global cap boundary tests ───────────────────────────────
+    //
+    // Lock the "0, at cap, over cap" boundary for the global active-policy
+    // limit (MAX_POLICIES = 1_000).  Most tests manipulate storage directly
+    // so we don't pay the cost of creating 1 000 real policies per test.
+    //
+    // Where tests pre-fill the active index with dummy IDs that have no
+    // backing Policy entries in storage: this is intentional — the cap check
+    // only inspects Vec::len(), and remove_active_policy only touches the
+    // active list.  If either function later validates policy existence the
+    // corresponding test must be updated.
+
+    /// Creating the first policy when the active index starts at zero must
+    /// return a valid, positive policy ID.
+    #[test]
+    fn max_policies_create_from_zero_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let owner = Address::generate(&env);
+
+        // Pre-condition: active index is empty.
+        let page = c.get_active_policies(&owner, &0, &1);
+        assert_eq!(page.count, 0, "precondition: no active policies exist");
+
+        let id = c.create_policy(
+            &owner,
+            &n(&env, "First"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+        assert!(id > 0, "first policy creation from zero must succeed");
+    }
+
+    /// Creating a policy when the active index is exactly at MAX_POLICIES must
+    /// return MaxPoliciesReached.
+    #[test]
+    fn max_policies_at_cap_returns_max_policies_reached() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let owner = Address::generate(&env);
+
+        // Pre-fill the active index to exactly MAX_POLICIES entries.
+        let mut full = Vec::new(&env);
+        for i in 1..=MAX_POLICIES {
+            full.push_back(i);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ActivePolicies, &full);
+        env.storage()
+            .instance()
+            .set(&DataKey::PolicyCount, &MAX_POLICIES);
+
+        assert_eq!(
+            c.try_create_policy(
+                &owner,
+                &n(&env, "Over"),
+                &CoverageType::Health,
+                &5_000_000i128,
+                &50_000_000i128,
+            )
+            .unwrap_err()
+            .unwrap(),
+            InsuranceError::MaxPoliciesReached,
+            "creating at MAX_POLICIES cap must return MaxPoliciesReached"
+        );
+    }
+
+    /// Creating a policy when the active index *exceeds* MAX_POLICIES must also
+    /// return MaxPoliciesReached (defence-in-depth for the `>=` guard).
+    #[test]
+    fn max_policies_over_cap_returns_max_policies_reached() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let owner = Address::generate(&env);
+
+        // Pre-fill beyond MAX_POLICIES.
+        let mut over = Vec::new(&env);
+        for i in 1..=MAX_POLICIES + 1 {
+            over.push_back(i);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ActivePolicies, &over);
+        env.storage()
+            .instance()
+            .set(&DataKey::PolicyCount, &(MAX_POLICIES + 1));
+
+        assert_eq!(
+            c.try_create_policy(
+                &owner,
+                &n(&env, "Over"),
+                &CoverageType::Health,
+                &5_000_000i128,
+                &50_000_000i128,
+            )
+            .unwrap_err()
+            .unwrap(),
+            InsuranceError::MaxPoliciesReached,
+            "creating beyond MAX_POLICIES must return MaxPoliciesReached"
+        );
+    }
+
+    /// Deactivating one policy at the cap must free a slot so a subsequent
+    /// create succeeds — the active count must stay at MAX_POLICIES.
+    #[test]
+    fn max_policies_deactivate_at_cap_frees_slot_for_new_create() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let owner = Address::generate(&env);
+
+        // Create one real policy so we can deactivate it later.
+        let pid = c.create_policy(
+            &owner,
+            &n(&env, "ToDeactivate"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+        assert_eq!(pid, 1);
+
+        // Fill the remaining slots to MAX_POLICIES with dummy IDs.
+        let mut full = Vec::new(&env);
+        full.push_back(pid);
+        for i in 2..=MAX_POLICIES {
+            full.push_back(i);
+        }
+        assert_eq!(full.len(), MAX_POLICIES);
+        env.storage()
+            .instance()
+            .set(&DataKey::ActivePolicies, &full);
+        env.storage()
+            .instance()
+            .set(&DataKey::PolicyCount, &MAX_POLICIES);
+
+        // At cap — create must be rejected.
+        assert_eq!(
+            c.try_create_policy(
+                &owner,
+                &n(&env, "ShouldFail"),
+                &CoverageType::Health,
+                &5_000_000i128,
+                &50_000_000i128,
+            )
+            .unwrap_err()
+            .unwrap(),
+            InsuranceError::MaxPoliciesReached,
+            "precondition: must be at cap before deactivation"
+        );
+
+        // Deactivate the real policy — this calls remove_active_policy.
+        assert!(c.deactivate_policy(&owner, &pid));
+
+        // Slot freed — new create must succeed.
+        let new_id = c.create_policy(
+            &owner,
+            &n(&env, "NewPolicy"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+        assert!(
+            new_id > pid,
+            "deactivating at cap must free a slot so a new create succeeds"
+        );
+    }
+
+    /// Aggregating MAX_POLICIES policies at the maximum per-type premium
+    /// must return the correct total without panicking.
+    #[test]
+    fn max_policies_total_premium_at_cap_aggregates_correctly() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.budget().reset_unlimited();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let owner = Address::generate(&env);
+
+        // Pick Health's max_premium for a large-but-valid value.
+        let premium: i128 = 500_000_000_000i128;
+
+        // Create MAX_POLICIES real policies at max premium.
+        for _ in 0..MAX_POLICIES {
+            c.create_policy(
+                &owner,
+                &n(&env, "Big"),
+                &CoverageType::Health,
+                &premium,
+                &10_000i128,
+            );
+        }
+
+        let total = c.get_total_monthly_premium(&owner);
+        let expected = premium.saturating_mul(MAX_POLICIES as i128);
+        assert_eq!(
+            total, expected,
+            "total premium at cap must aggregate correctly"
+        );
+    }
+
+    /// The MAX_POLICIES cap is global (on the ActivePolicies index), not
+    /// per-owner.  When the global cap is reached — even entirely through
+    /// another owner's policies — a new owner with zero policies must be
+    /// rejected with MaxPoliciesReached.
+    #[test]
+    fn max_policies_cap_is_global_not_per_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+
+        // Alice creates one real policy.
+        let alice_pid = c.create_policy(
+            &alice,
+            &n(&env, "AlicePolicy"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+
+        // Pre-fill the rest of the global active index to MAX_POLICIES.
+        let mut full = Vec::new(&env);
+        full.push_back(alice_pid);
+        for i in 2..=MAX_POLICIES {
+            full.push_back(i);
+        }
+        assert_eq!(full.len(), MAX_POLICIES);
+        env.storage()
+            .instance()
+            .set(&DataKey::ActivePolicies, &full);
+        env.storage()
+            .instance()
+            .set(&DataKey::PolicyCount, &MAX_POLICIES);
+
+        // Bob — who has zero policies — must be rejected because the
+        // *global* cap is full.
+        assert_eq!(
+            c.try_create_policy(
+                &bob,
+                &n(&env, "BobPolicy"),
+                &CoverageType::Health,
+                &5_000_000i128,
+                &50_000_000i128,
+            )
+            .unwrap_err()
+            .unwrap(),
+            InsuranceError::MaxPoliciesReached,
+            "cap is global: Bob must be rejected even though he has zero policies"
+        );
+    }
 }
