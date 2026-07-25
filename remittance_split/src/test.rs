@@ -2482,7 +2482,28 @@ fn test_initialize_split_percentages_invalid_sum() {
 }
 
 #[test]
+#[test]
 fn test_initialize_split_rejects_unsupported_ingress_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let result = client.try_initialize_split(&owner, &0, &token_addr, &4000, &3000, &2000, &1000);
+
+    assert_eq!(
+        result,
+        Err(Ok(RemittanceSplitError::UnsupportedTokenContract))
+    );
+}
+
+#[test]
+fn test_update_split_percentage_out_of_range() {
     let env = Env::default();
     env.mock_all_auths();
     set_time(&env, 1_000);

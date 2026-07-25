@@ -85,10 +85,14 @@ pub enum RemittanceSplitError {
     /// The `Bytes` value about to be returned exceeds `MAX_BYTES_RETURN`.
     /// Prevents consumers from being forced to deserialise an unbounded payload.
     ReturnBytesTooLarge = 28,
+    /// No pre-upgrade snapshot exists for restore.
+    SnapshotNotFound = 29,
+    /// The pre-upgrade snapshot is older than the freshness window.
+    SnapshotTooOld = 30,
     /// The supplied token contract is not a supported stable ingress asset.
     /// This is a defence-in-depth rejection for rebase/deflationary or otherwise
     /// incompatible token contracts that would undermine the remittance invariants.
-    UnsupportedTokenContract = 29,
+    UnsupportedTokenContract = 31,
 }
 
 #[derive(Clone)]
@@ -1046,6 +1050,11 @@ impl RemittanceSplit {
 
         Self::require_not_paused(&env)?;
         Self::require_nonce(&env, &owner, nonce)?;
+
+        if let Err(_e) = Self::validate_supported_token_contract(&env, &usdc_contract) {
+            Self::append_audit(&env, symbol_short!("init"), &owner, false);
+            return Err(RemittanceSplitError::UnsupportedTokenContract);
+        }
 
         let existing: Option<SplitConfig> = env.storage().instance().get(&symbol_short!("CONFIG"));
         if existing.is_some() {
