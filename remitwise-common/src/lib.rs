@@ -1071,6 +1071,9 @@ impl ToI128Checked for i32 {
 /// so that integer arithmetic can be used without floating point.
 pub const BASIS_POINTS: u32 = 10_000;
 
+/// Basis points per percent: 100 bps = 1%.
+pub const BPS_PER_PERCENT: u32 = 100;
+
 /// Error returned by [`Rate`] arithmetic when the result overflows `i128`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RateError {
@@ -1122,10 +1125,35 @@ impl Rate {
         Self(bps)
     }
 
+    /// Create a `Rate` from a percentage value.
+    ///
+    /// Converts percentage to basis points by multiplying by BPS_PER_PERCENT (100).
+    /// For example: 5% becomes 500 basis points.
+    #[inline(always)]
+    pub fn from_percent(percent: u32) -> Self {
+        Self(percent.saturating_mul(BPS_PER_PERCENT))
+    }
+
     /// Return the raw basis-point value.
     #[inline(always)]
     pub fn to_bps(self) -> u32 {
         self.0
+    }
+
+    /// Convert to percentage, truncating fractional basis points.
+    ///
+    /// For example: 550 bps becomes 5%.
+    #[inline(always)]  
+    pub fn to_percent(self) -> u32 {
+        self.0 / BPS_PER_PERCENT
+    }
+
+    /// Returns true if this rate has fractional basis points that don't align to whole percents.
+    ///
+    /// For example: 550 bps returns true (0.5% fractional), 500 bps returns false (exactly 5%).
+    #[inline(always)]
+    pub fn has_fractional_percent(self) -> bool {
+        self.0 % BPS_PER_PERCENT != 0
     }
 
     /// Apply this rate to `amount`, computing `(amount * self) / BASIS_POINTS`.
