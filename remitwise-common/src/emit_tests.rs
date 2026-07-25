@@ -1,19 +1,9 @@
 use crate::{EventCategory, EventPriority, RemitwiseEvents};
-use soroban_sdk::{contract, contractimpl, symbol_short, testutils::Events as _, Env, FromVal, Vec};
-
-#[contract]
-pub struct EventHarness;
-
-#[contractimpl]
-impl EventHarness {
-    pub fn noop(_env: Env) {}
-}
+use soroban_sdk::{symbol_short, Env, Vec};
 
 #[test]
 fn test_compact_event_passes() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, EventHarness);
-    // A small payload
     let data = 42u32;
     env.as_contract(&contract_id, || {
         RemitwiseEvents::emit(
@@ -30,8 +20,6 @@ fn test_compact_event_passes() {
 #[should_panic(expected = "exceeds 256-byte budget")]
 fn test_oversized_event_flagged() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, EventHarness);
-    // A very large payload
     let mut large_data = Vec::<u32>::new(&env);
     for i in 0..100 {
         large_data.push_back(i);
@@ -68,7 +56,7 @@ fn test_emit_topics_include_remitwise_sentinel() {
     let events = env.events().all();
     assert!(!events.is_empty());
     // The first topic element must be the Remitwise sentinel symbol.
-    let (_contract_id, topics, _data) = events.last().unwrap();
+    let (_cid, topics, _data) = events.last().unwrap();
     let sentinel = soroban_sdk::Val::from_val(&env, &topics.get(0).unwrap());
     let expected = soroban_sdk::Symbol::new(&env, "Remitwise").to_val();
     assert_eq!(sentinel.get_payload(), expected.get_payload());
@@ -88,7 +76,7 @@ fn test_emit_encodes_category_as_second_topic() {
         );
     });
     let events = env.events().all();
-    let (_contract_id, topics, _data) = events.last().unwrap();
+    let (_cid, topics, _data) = events.last().unwrap();
     let cat_raw: u32 = soroban_sdk::FromVal::from_val(&env, &topics.get(1).unwrap());
     assert_eq!(cat_raw, EventCategory::Compliance.to_u32());
 }
@@ -107,7 +95,7 @@ fn test_emit_encodes_priority_as_third_topic() {
         );
     });
     let events = env.events().all();
-    let (_contract_id, topics, _data) = events.last().unwrap();
+    let (_cid, topics, _data) = events.last().unwrap();
     let prio_raw: u32 = soroban_sdk::FromVal::from_val(&env, &topics.get(2).unwrap());
     assert_eq!(prio_raw, EventPriority::Critical.to_u32());
 }
@@ -115,31 +103,38 @@ fn test_emit_encodes_priority_as_third_topic() {
 #[test]
 fn test_emit_batch_uses_low_priority_topic() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, EventHarness);
-    env.as_contract(&contract_id, || {
-        RemitwiseEvents::emit_batch(
-            &env,
-            EventCategory::Transaction,
-            symbol_short!("batch"),
-            5,
-        );
-    });
+    RemitwiseEvents::emit_batch(&env, EventCategory::Transaction, symbol_short!("batch"), 5);
     let events = env.events().all();
-    let (_contract_id, topics, _data) = events.last().unwrap();
+    let (_cid, topics, _data) = events.last().unwrap();
     let prio_raw: u32 = soroban_sdk::FromVal::from_val(&env, &topics.get(2).unwrap());
     assert_eq!(prio_raw, EventPriority::Low.to_u32());
 }
 
 #[test]
 fn test_emit_all_categories_are_distinct() {
-    assert_ne!(EventCategory::Transaction.to_u32(), EventCategory::Compliance.to_u32());
-    assert_ne!(EventCategory::Compliance.to_u32(), EventCategory::System.to_u32());
-    assert_ne!(EventCategory::Transaction.to_u32(), EventCategory::System.to_u32());
+    assert_ne!(
+        EventCategory::Transaction.to_u32(),
+        EventCategory::Compliance.to_u32()
+    );
+    assert_ne!(
+        EventCategory::Compliance.to_u32(),
+        EventCategory::System.to_u32()
+    );
+    assert_ne!(
+        EventCategory::Transaction.to_u32(),
+        EventCategory::System.to_u32()
+    );
 }
 
 #[test]
 fn test_emit_all_priorities_are_distinct() {
     assert_ne!(EventPriority::Low.to_u32(), EventPriority::High.to_u32());
-    assert_ne!(EventPriority::High.to_u32(), EventPriority::Critical.to_u32());
-    assert_ne!(EventPriority::Low.to_u32(), EventPriority::Critical.to_u32());
+    assert_ne!(
+        EventPriority::High.to_u32(),
+        EventPriority::Critical.to_u32()
+    );
+    assert_ne!(
+        EventPriority::Low.to_u32(),
+        EventPriority::Critical.to_u32()
+    );
 }
