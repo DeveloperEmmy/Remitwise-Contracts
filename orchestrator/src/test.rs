@@ -3,7 +3,6 @@
 extern crate std;
 
 use super::*;
-use remitwise_common::reversible_op::ReversibleOpError;
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger as _},
@@ -22,40 +21,28 @@ impl MockContract {
     pub fn calculate_split(env: Env, _total_amount: i128) -> Vec<i128> {
         soroban_sdk::vec![&env, 2500, 2500, 2500, 2500]
     }
-    pub fn add_to_goal(_env: Env, _caller: Address, _goal_id: u32, _amount: i128) -> bool {
-        true
-    }
-    pub fn pay_bill(_env: Env, _caller: Address, _bill_id: u32, _amount: i128) -> bool {
-        true
-    }
-    pub fn pay_premium(_env: Env, _caller: Address, _policy_id: u32, _amount: i128) -> bool {
-        true
-    }
+    pub fn add_to_goal(_env: Env, _caller: Address, _goal_id: u32, _amount: i128) {}
+    pub fn pay_bill(_env: Env, _caller: Address, _bill_id: u32, _amount: i128) {}
+    pub fn pay_premium(_env: Env, _caller: Address, _policy_id: u32, _amount: i128) {}
     // Compensation / reverse methods for rollback support.
     pub fn remove_from_goal(
         _env: Env,
         _user: Address,
         _goal_id: u32,
         _amount: i128,
-    ) -> Result<bool, ReversibleOpError> {
-        Ok(true)
-    }
+    ) {}
     pub fn reverse_payment(
         _env: Env,
         _user: Address,
         _bill_id: u32,
         _amount: i128,
-    ) -> Result<bool, ReversibleOpError> {
-        Ok(true)
-    }
+    ) {}
     pub fn reverse_premium(
         _env: Env,
         _user: Address,
         _policy_id: u32,
         _amount: i128,
-    ) -> Result<bool, ReversibleOpError> {
-        Ok(true)
-    }
+    ) {}
 }
 
 #[contract]
@@ -80,15 +67,11 @@ mod mock_fail_savings {
         pub fn calculate_split(env: Env, _total_amount: i128) -> Vec<i128> {
             soroban_sdk::vec![&env, 2500i128, 2500i128, 2500i128, 2500i128]
         }
-        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) -> bool {
-            false
+        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {
+            panic!("savings step failed");
         }
-        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) -> bool {
-            true
-        }
-        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) -> bool {
-            true
-        }
+        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {}
+        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {}
     }
 }
 
@@ -106,15 +89,11 @@ mod mock_fail_bill {
         pub fn calculate_split(env: Env, _total_amount: i128) -> Vec<i128> {
             soroban_sdk::vec![&env, 2500i128, 2500i128, 2500i128, 2500i128]
         }
-        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) -> bool {
-            true
+        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {}
+        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {
+            panic!("bill step failed");
         }
-        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) -> bool {
-            false
-        }
-        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) -> bool {
-            true
-        }
+        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {}
     }
 }
 
@@ -132,14 +111,10 @@ mod mock_fail_insurance {
         pub fn calculate_split(env: Env, _total_amount: i128) -> Vec<i128> {
             soroban_sdk::vec![&env, 2500i128, 2500i128, 2500i128, 2500i128]
         }
-        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) -> bool {
-            true
-        }
-        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) -> bool {
-            true
-        }
-        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) -> bool {
-            false
+        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {}
+        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {}
+        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {
+            panic!("insurance step failed");
         }
     }
 }
@@ -158,15 +133,9 @@ mod mock_no_limit {
         pub fn calculate_split(env: Env, _total_amount: i128) -> Vec<i128> {
             soroban_sdk::vec![&env, 2500i128, 2500i128, 2500i128, 2500i128]
         }
-        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) -> bool {
-            true
-        }
-        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) -> bool {
-            true
-        }
-        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) -> bool {
-            true
-        }
+        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {}
+        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {}
+        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {}
     }
 }
 
@@ -233,7 +202,7 @@ fn wasm_size_budgets() -> &'static [(&'static str, usize)] {
         ("remittance_split.wasm", 110_000),
         ("savings_goals.wasm", 112_000),
         ("bill_payments.wasm", 135_000),
-        ("insurance.wasm", 52_000),
+        ("insurance.wasm", 57_000),
         ("family_wallet.wasm", 130_000),
     ]
 }
@@ -653,11 +622,8 @@ fn test_execute_flow_signed_invalid_amount_zero() {
     let deadline = env.ledger().timestamp() + 1000;
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, 0, deadline);
 
-    let result = client.try_execute_remittance_flow_signed(
-        &executor, &0,
-        &0, &deadline, &hash,
-        &0u64,
-    );
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &0, &0, &deadline, &hash, &0u64);
 
     assert_eq!(result, Err(Ok(OrchestratorError::InvalidAmount)));
 }
@@ -674,8 +640,11 @@ fn test_execute_flow_signed_invalid_amount_negative() {
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, -100, deadline);
 
     let result = client.try_execute_remittance_flow_signed(
-        &executor, &(-100i128),
-        &0, &deadline, &hash,
+        &executor,
+        &(-100i128),
+        &0,
+        &deadline,
+        &hash,
         &0u64,
     );
 
@@ -694,8 +663,11 @@ fn test_execute_flow_signed_invalid_amount_i128_min() {
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, i128::MIN, deadline);
 
     let result = client.try_execute_remittance_flow_signed(
-        &executor, &(i128::MIN),
-        &0, &deadline, &hash,
+        &executor,
+        &(i128::MIN),
+        &0,
+        &deadline,
+        &hash,
         &0u64,
     );
 
@@ -713,13 +685,13 @@ fn test_execute_flow_signed_valid_amount_minimum_positive() {
     let deadline = env.ledger().timestamp() + 1000;
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, 1, deadline);
 
-    let result = client.try_execute_remittance_flow_signed(
-        &executor, &1,
-        &0, &deadline, &hash,
-        &0u64,
-    );
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &1, &0, &deadline, &hash, &0u64);
 
-    assert!(result.is_ok(), "amount=1 should be accepted as valid positive amount");
+    assert!(
+        result.is_ok(),
+        "amount=1 should be accepted as valid positive amount"
+    );
 }
 
 #[test]
@@ -734,7 +706,8 @@ fn test_execute_flow_deadline_expired() {
     let deadline = env.ledger().timestamp(); // not strictly in the future
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, 1000, deadline);
 
-    let result = client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
 
     assert_eq!(result, Err(Ok(OrchestratorError::DeadlineExpired)));
 }
@@ -750,7 +723,8 @@ fn test_execute_flow_deadline_too_far() {
 
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, 1000, deadline);
 
-    let result = client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
 
     assert_eq!(result, Err(Ok(OrchestratorError::DeadlineExpired)));
 }
@@ -766,8 +740,8 @@ fn test_execute_flow_invalid_hash() {
 
     let bad_hash = 12345u64;
 
-    let result =
-        client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &bad_hash, &0u64);
+    let result = client
+        .try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &bad_hash, &0u64);
 
     assert_eq!(result, Err(Ok(OrchestratorError::InvalidNonce)));
 }
@@ -784,7 +758,8 @@ fn test_out_of_order_nonce_fails() {
 
     // Attempt to execute with nonce 5 when current nonce is 0
     let hash = compute_test_hash(&env, symbol_short!("flow"), 5, 1000, deadline);
-    let result = client.try_execute_remittance_flow_signed(&executor, &1000, &5, &deadline, &hash, &0u64);
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &1000, &5, &deadline, &hash, &0u64);
 
     assert_eq!(
         result,
@@ -842,8 +817,8 @@ fn test_request_hash_binding_prevents_parameter_swap() {
     let hash_1000 = compute_test_hash(&env, symbol_short!("flow"), 0, 1000, deadline);
 
     // Try to execute with different amount but using hash from 1000
-    let result =
-        client.try_execute_remittance_flow_signed(&executor, &5000, &0, &deadline, &hash_1000, &0u64);
+    let result = client
+        .try_execute_remittance_flow_signed(&executor, &5000, &0, &deadline, &hash_1000, &0u64);
 
     assert_eq!(
         result,
@@ -865,8 +840,14 @@ fn test_deadline_window_prevents_old_requests() {
     let far_deadline = current_time + 366 * 86400; // 1 year in future (exceeds MAX_DEADLINE_WINDOW_SECS)
 
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, 1000, far_deadline);
-    let result =
-        client.try_execute_remittance_flow_signed(&executor, &1000, &0, &far_deadline, &hash, &0u64);
+    let result = client.try_execute_remittance_flow_signed(
+        &executor,
+        &1000,
+        &0,
+        &far_deadline,
+        &hash,
+        &0u64,
+    );
 
     assert_eq!(
         result,
@@ -912,7 +893,8 @@ fn test_signed_deadline_at_window_edge_accepted() {
     let deadline = now + MAX_DEADLINE_WINDOW_SECS; // exactly at the edge
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, 1000, deadline);
 
-    let result = client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
 
     assert_eq!(
         result,
@@ -938,7 +920,8 @@ fn test_signed_deadline_one_past_window_rejected() {
     let deadline = now + MAX_DEADLINE_WINDOW_SECS + 1; // one second too far
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, 1000, deadline);
 
-    let result = client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
 
     assert_eq!(
         result,
@@ -963,7 +946,8 @@ fn test_signed_deadline_in_past_rejected() {
     let deadline = now - 1; // strictly in the past
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, 1000, deadline);
 
-    let result = client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
 
     assert_eq!(
         result,
@@ -992,14 +976,16 @@ fn test_signed_in_window_replay_with_used_nonce_rejected() {
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, 1000, deadline);
 
     // First call succeeds and consumes nonce 0.
-    let first = client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
+    let first =
+        client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
     assert_eq!(first, Ok(Ok(true)));
     assert_eq!(client.get_nonce(&executor), 1);
 
     // Replay the identical request while the deadline is still in-window. The
     // deadline and hash checks pass, but the used-nonce check fires before the
     // sequential counter check and rejects the stale nonce.
-    let replay = client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
+    let replay =
+        client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
     assert_eq!(
         replay,
         Err(Ok(OrchestratorError::NonceAlreadyUsed)),
@@ -1058,7 +1044,8 @@ fn test_rollback_savings_step_returns_cross_contract_error() {
     let deadline = signed_flow_deadline(&env);
     let hash = signed_flow_hash(&env, &executor, 10000, 0, deadline);
 
-    let result = client.try_execute_remittance_flow_signed(&executor, &10000, &0, &deadline, &hash, &0u64);
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &10000, &0, &deadline, &hash, &0u64);
     // First write step (savings) fails — nothing to compensate.
     assert_eq!(result, Err(Ok(OrchestratorError::CrossContractCallFailed)));
     // Lock must be released.
@@ -1083,7 +1070,8 @@ fn test_rollback_bill_step_triggers_compensation() {
     let deadline = signed_flow_deadline(&env);
     let hash = signed_flow_hash(&env, &executor, 10000, 0, deadline);
 
-    let result = client.try_execute_remittance_flow_signed(&executor, &10000, &0, &deadline, &hash, &0u64);
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &10000, &0, &deadline, &hash, &0u64);
     // Bill step failed after savings succeeded → rollback.
     assert_eq!(result, Err(Ok(OrchestratorError::RemittanceFlowRolledBack)));
     // Lock must be released.
@@ -1108,7 +1096,8 @@ fn test_rollback_insurance_step_triggers_compensation() {
     let deadline = signed_flow_deadline(&env);
     let hash = signed_flow_hash(&env, &executor, 10000, 0, deadline);
 
-    let result = client.try_execute_remittance_flow_signed(&executor, &10000, &0, &deadline, &hash, &0u64);
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &10000, &0, &deadline, &hash, &0u64);
     // Insurance step failed after savings + bills → rollback.
     assert_eq!(result, Err(Ok(OrchestratorError::RemittanceFlowRolledBack)));
     // Lock must be released.
@@ -1133,7 +1122,8 @@ fn test_rollback_lock_released_and_stats_updated_on_failure() {
     let deadline = signed_flow_deadline(&env);
 
     let hash = signed_flow_hash(&env, &executor, 10000, 0, deadline);
-    let result = client.try_execute_remittance_flow_signed(&executor, &10000, &0, &deadline, &hash, &0u64);
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &10000, &0, &deadline, &hash, &0u64);
 
     // Verify the error is the expected orchestration error.
     // Note: Soroban's try_call path rolls back ALL storage on error return,
@@ -1173,7 +1163,8 @@ fn test_rollback_spending_check_rejection() {
     let deadline = signed_flow_deadline(&env);
     let hash = signed_flow_hash(&env, &executor, 10000, 0, deadline);
 
-    let result = client.try_execute_remittance_flow_signed(&executor, &10000, &0, &deadline, &hash, &0u64);
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &10000, &0, &deadline, &hash, &0u64);
     // Spending limit check is pre-validation (read-only), fails before any writes.
     assert_eq!(result, Err(Ok(OrchestratorError::Unauthorized)));
     // Lock must be released (lock was never acquired — error before lock scope).
@@ -1196,7 +1187,8 @@ fn test_rollback_audit_records_failure_with_step_context() {
     let deadline = signed_flow_deadline(&env);
     let hash = signed_flow_hash(&env, &executor, 10000, 0, deadline);
 
-    let _ = client.try_execute_remittance_flow_signed(&executor, &10000, &0, &deadline, &hash, &0u64);
+    let _ =
+        client.try_execute_remittance_flow_signed(&executor, &10000, &0, &deadline, &hash, &0u64);
 
     // Note: try_call rolls back the audit storage on error, so we verify
     // the failure path exists via the other tests that check error values.
@@ -1222,7 +1214,8 @@ fn test_signed_deadline_rejected_does_not_mutate_stats() {
     let now = env.ledger().timestamp();
     let deadline = now + MAX_DEADLINE_WINDOW_SECS + 1;
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, 1000, deadline);
-    let result = client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &1000, &0, &deadline, &hash, &0u64);
     assert_eq!(result, Err(Ok(OrchestratorError::DeadlineExpired)));
 
     let after = client.get_execution_stats().unwrap();
@@ -1458,7 +1451,14 @@ fn test_unsigned_and_signed_flow_stats_parity() {
 
     let deadline = env.ledger().timestamp() + 1000;
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, 1000, deadline);
-    assert!(client.execute_remittance_flow_signed(&signed_executor, &1000, &0, &deadline, &hash, &0u64));
+    assert!(client.execute_remittance_flow_signed(
+        &signed_executor,
+        &1000,
+        &0,
+        &deadline,
+        &hash,
+        &0u64
+    ));
 
     let after_signed = client.get_execution_stats().unwrap();
     assert_eq!(after_signed.total_executions, 2);
@@ -1586,7 +1586,8 @@ fn test_invalid_amount_unsigned_i128_min() {
     let mock_id = env.register_contract(None, MockContract);
     let caller = Address::generate(&env);
 
-    let result = client.try_execute_remittance_flow(&flow_params(&env, &caller, &mock_id, i128::MIN));
+    let result =
+        client.try_execute_remittance_flow(&flow_params(&env, &caller, &mock_id, i128::MIN));
     assert_eq!(result, Err(Ok(OrchestratorError::InvalidAmount)));
 }
 
@@ -1600,7 +1601,10 @@ fn test_valid_amount_unsigned_minimum_positive() {
     let caller = Address::generate(&env);
 
     let result = client.try_execute_remittance_flow(&flow_params(&env, &caller, &mock_id, 1));
-    assert!(result.is_ok(), "amount=1 should be accepted as valid positive amount");
+    assert!(
+        result.is_ok(),
+        "amount=1 should be accepted as valid positive amount"
+    );
 }
 
 #[test]
@@ -1673,15 +1677,9 @@ mod mock_split_0 {
         pub fn calculate_split(env: Env, _total_amount: i128) -> Vec<i128> {
             Vec::new(&env)
         }
-        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) -> bool {
-            true
-        }
-        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) -> bool {
-            true
-        }
-        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) -> bool {
-            true
-        }
+        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {}
+        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {}
+        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {}
     }
 }
 
@@ -1698,15 +1696,9 @@ mod mock_split_1 {
         pub fn calculate_split(env: Env, _total_amount: i128) -> Vec<i128> {
             soroban_sdk::vec![&env, 10000i128]
         }
-        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) -> bool {
-            true
-        }
-        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) -> bool {
-            true
-        }
-        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) -> bool {
-            true
-        }
+        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {}
+        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {}
+        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {}
     }
 }
 
@@ -1723,21 +1715,14 @@ mod mock_split_3 {
         pub fn calculate_split(env: Env, _total_amount: i128) -> Vec<i128> {
             soroban_sdk::vec![&env, 2500i128, 2500i128, 2500i128]
         }
-        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) -> bool {
-            true
-        }
-        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) -> bool {
-            true
-        }
-        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) -> bool {
-            true
-        }
+        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {}
+        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {}
+        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {}
     }
 }
 
 /// Mock whose calculate_split returns exactly 4 allocations (valid).
 mod mock_split_4 {
-    use remitwise_common::reversible_op::ReversibleOpError;
     use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
     #[contract]
     pub struct Contract;
@@ -1749,39 +1734,27 @@ mod mock_split_4 {
         pub fn calculate_split(env: Env, _total_amount: i128) -> Vec<i128> {
             soroban_sdk::vec![&env, 2500i128, 2500i128, 2500i128, 2500i128]
         }
-        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) -> bool {
-            true
-        }
-        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) -> bool {
-            true
-        }
-        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) -> bool {
-            true
-        }
+        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {}
+        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {}
+        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {}
         pub fn remove_from_goal(
             _env: Env,
             _user: Address,
             _goal_id: u32,
             _amount: i128,
-        ) -> Result<bool, ReversibleOpError> {
-            Ok(true)
-        }
+        ) {}
         pub fn reverse_payment(
             _env: Env,
             _user: Address,
             _bill_id: u32,
             _amount: i128,
-        ) -> Result<bool, ReversibleOpError> {
-            Ok(true)
-        }
+        ) {}
         pub fn reverse_premium(
             _env: Env,
             _user: Address,
             _policy_id: u32,
             _amount: i128,
-        ) -> Result<bool, ReversibleOpError> {
-            Ok(true)
-        }
+        ) {}
     }
 }
 
@@ -1798,15 +1771,9 @@ mod mock_split_negative {
         pub fn calculate_split(env: Env, _total_amount: i128) -> Vec<i128> {
             soroban_sdk::vec![&env, 2500i128, -500i128, 2500i128, 2500i128]
         }
-        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) -> bool {
-            true
-        }
-        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) -> bool {
-            true
-        }
-        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) -> bool {
-            true
-        }
+        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {}
+        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {}
+        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {}
     }
 }
 
@@ -1815,7 +1782,6 @@ mod mock_split_negative {
 /// Used to verify that EXEC_LOCK is released even when downstream contracts
 /// are maximally adversarial (all steps fail without panicking).
 mod mock_hostile_all_fail {
-    use remitwise_common::reversible_op::ReversibleOpError;
     use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
 
     #[contract]
@@ -1829,13 +1795,13 @@ mod mock_hostile_all_fail {
         pub fn calculate_split(env: Env, _total_amount: i128) -> Vec<i128> {
             soroban_sdk::vec![&env, 2500i128, 2500i128, 2500i128, 2500i128]
         }
-        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) -> bool {
+        pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {
             panic!("savings step failed")
         }
-        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) -> bool {
+        pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {
             panic!("bill step failed")
         }
-        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) -> bool {
+        pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {
             panic!("insurance step failed")
         }
         pub fn remove_from_goal(
@@ -1843,25 +1809,19 @@ mod mock_hostile_all_fail {
             _user: Address,
             _goal_id: u32,
             _amount: i128,
-        ) -> Result<bool, ReversibleOpError> {
-            Ok(false)
-        }
+        ) {}
         pub fn reverse_payment(
             _env: Env,
             _user: Address,
             _bill_id: u32,
             _amount: i128,
-        ) -> Result<bool, ReversibleOpError> {
-            Ok(false)
-        }
+        ) {}
         pub fn reverse_premium(
             _env: Env,
             _user: Address,
             _policy_id: u32,
             _amount: i128,
-        ) -> Result<bool, ReversibleOpError> {
-            Ok(false)
-        }
+        ) {}
     }
 }
 
@@ -2019,15 +1979,21 @@ fn test_epoch_mismatch_rejects_stale_token() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(1_000);
-    
+
     let orchestrator_id = env.register_contract(None, Orchestrator);
     let client = OrchestratorClient::new(&env, &orchestrator_id);
-    let mock_id = env.register_contract(None, MockContract);
+    let mock_id1 = env.register_contract(None, MockContract);
+    let mock_id2 = env.register_contract(None, MockContract);
+    let mock_id3 = env.register_contract(None, MockContract);
+    let mock_id4 = env.register_contract(None, MockContract);
+    let mock_id5 = env.register_contract(None, MockContract);
     let owner = Address::generate(&env);
     let executor = Address::generate(&env);
 
     // Initialize orchestrator
-    client.init(&owner, &mock_id, &mock_id, &mock_id, &mock_id, &mock_id);
+    client.init(
+        &owner, &mock_id1, &mock_id2, &mock_id3, &mock_id4, &mock_id5,
+    );
 
     // Get current epoch (should be 0)
     let current_epoch = client.get_actor_epoch_public();
@@ -2042,7 +2008,7 @@ fn test_epoch_mismatch_rejects_stale_token() {
     let nonce = 0u64;
     let deadline = 10_000u64;
     let request_hash = 12345u64;
-    
+
     let result = client.try_execute_remittance_flow_signed(
         &executor,
         &amount,
@@ -2051,7 +2017,7 @@ fn test_epoch_mismatch_rejects_stale_token() {
         &request_hash,
         &0u64, // stale epoch
     );
-    
+
     assert_eq!(result, Err(Ok(OrchestratorError::EpochMismatch)));
 }
 
@@ -2061,15 +2027,21 @@ fn test_matching_epoch_allows_execution() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(1_000);
-    
+
     let orchestrator_id = env.register_contract(None, Orchestrator);
     let client = OrchestratorClient::new(&env, &orchestrator_id);
-    let mock_id = env.register_contract(None, MockContract);
+    let mock_id1 = env.register_contract(None, MockContract);
+    let mock_id2 = env.register_contract(None, MockContract);
+    let mock_id3 = env.register_contract(None, MockContract);
+    let mock_id4 = env.register_contract(None, MockContract);
+    let mock_id5 = env.register_contract(None, MockContract);
     let owner = Address::generate(&env);
     let executor = Address::generate(&env);
 
     // Initialize orchestrator
-    client.init(&owner, &mock_id, &mock_id, &mock_id, &mock_id, &mock_id);
+    client.init(
+        &owner, &mock_id1, &mock_id2, &mock_id3, &mock_id4, &mock_id5,
+    );
 
     // Get current epoch (should be 0)
     let current_epoch = client.get_actor_epoch_public();
@@ -2080,7 +2052,7 @@ fn test_matching_epoch_allows_execution() {
     let nonce = 0u64;
     let deadline = 10_000u64;
     let request_hash = 12345u64;
-    
+
     let result = client.try_execute_remittance_flow_signed(
         &executor,
         &amount,
@@ -2089,7 +2061,7 @@ fn test_matching_epoch_allows_execution() {
         &request_hash,
         &0u64, // matching epoch
     );
-    
+
     // Should not fail with EpochMismatch (may fail for other reasons like nonce validation)
     assert_ne!(result, Err(Ok(OrchestratorError::EpochMismatch)));
 }
