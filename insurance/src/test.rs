@@ -4,6 +4,8 @@ mod tests {
     use crate::*;
     use remitwise_common::CoverageType;
     use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, Env, String, Vec};
+use alloc::string::String as StdString;
+use core::fmt::Write;
 
     fn setup(env: &Env) -> InsuranceClient<'_> {
         let id = env.register_contract(None, Insurance);
@@ -1152,7 +1154,11 @@ mod tests {
         // Create and deactivate 25 policies (> DEFAULT_PAGE_LIMIT=20).
         let total: u32 = DEFAULT_PAGE_LIMIT + 5;
         for i in 0..total {
-            let name = String::from_str(&env, &format!("P{}", i));
+            let name = {
+    let mut s = StdString::new();
+    write!(&mut s, "P{}", i).unwrap();
+    String::from_str(&env, &s)
+};
             let id = c.create_policy(
                 &owner,
                 &name,
@@ -1194,7 +1200,7 @@ mod tests {
 
         let total: u32 = MAX_PAGE_LIMIT + 5;
         for i in 0..total {
-            let name = String::from_str(&env, &format!("P{}", i));
+            let name = String::from_str(&env, &("P".to_owned() + &i.to_string()));
             let id = c.create_policy(
                 &owner,
                 &name,
@@ -1234,7 +1240,7 @@ mod tests {
         // Seed more records than the requested limit.
         let total: u32 = requested_limit + 3;
         for i in 0..total {
-            let name = String::from_str(&env, &format!("P{}", i));
+            let name = String::from_str(&env, &("P".to_owned() + &i.to_string()));
             let id = c.create_policy(
                 &owner,
                 &name,
