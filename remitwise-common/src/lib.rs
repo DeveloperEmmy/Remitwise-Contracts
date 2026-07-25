@@ -988,6 +988,18 @@ pub enum TimeError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct Timestamp;
 
+/// Enumeration of period bucket types for timestamp bucketing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PeriodKind {
+    Day,
+    Week,
+    Month,
+}
+
+/// Seconds in a standard day (86400) and week (604800).
+pub const SECONDS_PER_DAY: u64 = 86400;
+pub const SECONDS_PER_WEEK: u64 = 86400 * 7;
+
 impl Timestamp {
     /// Returns the number of whole seconds from `now` until `target`.
     ///
@@ -998,7 +1010,48 @@ impl Timestamp {
     pub fn seconds_until(now: u64, target: u64) -> u64 {
         target.saturating_sub(now)
     }
+
+    /// Buckets a Unix timestamp into a stable period key (day/week/month).
+    ///
+    /// - Day: Returns the day index since Unix epoch (UTC), i.e. `timestamp / 86400`.
+    /// - Week: Returns the week index since Unix epoch (UTC), i.e. `timestamp / 604800`.
+    /// - Month: Returns the [YYYYMM] encoding as (year * 100 + month), e.g. 202412 for December 2024.
+    ///          Handles proleptic Gregorian conversion in UTC. Leap seconds are ignored.
+    ///
+    /// Pre-1970 timestamps are not representable through the `u64` API (day 0
+    /// is 1970-01-01). The function never panics and returns a `u64` for every
+    /// input; callers do not need to handle an error path.
+    #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+    #[inline(always)]
+    pub fn to_period_key(timestamp: u64, period: PeriodKind) -> u64 {
+        match period {
+            PeriodKind::Day => {
+                timestamp / SECONDS_PER_DAY
+            }
+            PeriodKind::Week => {
+                timestamp / SECONDS_PER_WEEK
+            }
+            PeriodKind::Month => {
+                // Convert timestamp (seconds since epoch) to YYYYMM integer.
+                // Uses proleptic Gregorian calendar, UTC; ignores leap seconds.
+                // Algorithm from https://howardhinnant.github.io/date_algorithms.html#civil_from_days
+                let days = timestamp / SECONDS_PER_DAY;
+                // 1970-01-01 is day 0.
+                let z = days as i64 + 719468;
+                let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+                let doe = z - era * 146097;                                    // [0, 146096]
+                let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+                let y = yoe + era * 400;
+                let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+                let mp = (5 * doy + 2) / 153;
+                let month = (mp + 2) % 12 + 1;
+                let year = y + (mp + 2) / 12;
+                (year as u64) * 100 + (month as u64)
+            }
+        }
+    }
 }
+
 
 /// Validates that a requested period is logically ordered.
 ///

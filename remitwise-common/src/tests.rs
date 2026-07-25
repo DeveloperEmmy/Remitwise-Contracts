@@ -641,6 +641,118 @@ fn test_clamp_limit_u32_max_contract_regression() {
     assert_eq!(clamp_limit(clamped), clamped);
 }
 
+// ─── Timestamp::to_period_key ────────────────────────────────────────────────
+
+#[test]
+fn test_period_key_day_and_week_buckets() {
+    // Jan 1, 1970 UTC (epoch)
+    let ts = 0u64;
+    assert_eq!(Timestamp::to_period_key(ts, PeriodKind::Day), 0);
+    assert_eq!(Timestamp::to_period_key(ts, PeriodKind::Week), 0);
+    assert_eq!(Timestamp::to_period_key(ts + 86399, PeriodKind::Day), 0);
+    assert_eq!(Timestamp::to_period_key(ts + 86400, PeriodKind::Day), 1);
+    assert_eq!(Timestamp::to_period_key(ts + 604799, PeriodKind::Week), 0);
+    assert_eq!(Timestamp::to_period_key(ts + 604800, PeriodKind::Week), 1);
+}
+
+#[test]
+fn test_period_key_month_bucket_epoch_and_dec_2023() {
+    // Epoch (Jan 1970)
+    assert_eq!(Timestamp::to_period_key(0, PeriodKind::Month), 197001);
+    // Dec 31, 2023 23:59:59 UTC
+    let ts = 1704067199;
+    assert_eq!(Timestamp::to_period_key(ts, PeriodKind::Month), 202312);
+    // Jan 1, 2024 00:00:00 UTC
+    let jan1_2024 = 1704067200;
+    assert_eq!(Timestamp::to_period_key(jan1_2024, PeriodKind::Month), 202401);
+}
+
+#[test]
+fn test_period_key_exact_rollover_edges() {
+    // Midnight UTC at 2021-02-28 to Mar 1st transition, and leap-year
+    let feb_28_2020 = 1582848000; // 2020-02-28 00:00:00 UTC
+    let feb_29_2020 = 1582934400; // 2020-02-29 00:00:00 UTC (leap)
+    let mar_1_2020  = 1583020800; // 2020-03-01 00:00:00 UTC
+    assert_eq!(Timestamp::to_period_key(feb_28_2020, PeriodKind::Month), 202002);
+    assert_eq!(Timestamp::to_period_key(feb_29_2020, PeriodKind::Month), 202002);
+    assert_eq!(Timestamp::to_period_key(mar_1_2020, PeriodKind::Month), 202003);
+}
+
+#[test]
+fn test_period_key_idempotent_and_monotonic_within_bucket() {
+    // For any t in the same day/week/month, key is identical and monotonic within that bucket
+    for period in [PeriodKind::Day, PeriodKind::Week, PeriodKind::Month] {
+        let mut prev = None;
+        for t in (1_700_000_000..1_700_010_000).step_by(101) {
+            let key = Timestamp::to_period_key(t, period);
+            if let Some(pkey) = prev {
+                // Monotonic: never decreases
+                assert!(key >= pkey);
+                // Idempotent: next t in same bucket, key stays same or bumps by 1
+                assert!(key == pkey || key == pkey + 1 || key == pkey); // Week/month boundaries are much further
+            }
+            prev = Some(key);
+        }
+    }
+}
+
+proptest! {
+    #[test]
+    fn proptest_period_key_roundtrips(t in 0u64..4660000000) { // up to year 2117
+        use remitwise_common::{PeriodKind::*};
+        let day = Timestamp::to_period_key(t, Day);
+        let week = Timestamp::to_period_key(t, Week);
+        let month = Timestamp::to_period_key(t, Month);
+        // Day bucket reconstructs the day-start timestamp
+        let day_start = day * 86400;
+        assert!(t >= day_start);
+        assert!(t < day_start + 86400);
+        // Week bucket reconstructs week-start timestamp
+        let week_start = week * 604800;
+        assert!(t >= week_start);
+        assert!(t < week_start + 604800);
+        // Month bucket is always >= 197001, never < 197001
+        assert!(month >= 197001);
+        let y = month / 100;
+        let m = month % 100;
+        assert!(y >= 1970 && m >= 1 && m <= 12);
+    }
+}
+
+// Pins the "no Result, no panic" contract of `Timestamp::to_period_key`
+// at the practical `u64::MAX` corner of the input domain.
+//
+// Day and Week are simple floor divisions and round-trip exactly. For Month
+// we only assert well-formed YYYYMM (month component in `1..=12`); the
+// numeric magnitude of the year component is implementation-defined and is
+// not pinned here.
+#[test]
+fn test_period_key_u64_max_does_not_panic() {
+    let ts = u64::MAX;
+
+    // Day: timestamp / SECONDS_PER_DAY (floor).
+    assert_eq!(
+        Timestamp::to_period_key(ts, PeriodKind::Day),
+        ts / SECONDS_PER_DAY
+    );
+
+    // Week: timestamp / SECONDS_PER_WEEK (floor).
+    assert_eq!(
+        Timestamp::to_period_key(ts, PeriodKind::Week),
+        ts / SECONDS_PER_WEEK
+    );
+
+    // Month: YYYYMM must contain a valid calendar month component.
+    let key = Timestamp::to_period_key(ts, PeriodKind::Month);
+    let month = key % 100;
+    assert!(
+        (1..=12).contains(&month),
+        "month component out of range ({}) for key={} at ts=u64::MAX",
+        month,
+        key
+    );
+}
+
 // ─── Timestamp::seconds_until ────────────────────────────────────────────────
 
 /// A future target returns the exact distance in seconds.
