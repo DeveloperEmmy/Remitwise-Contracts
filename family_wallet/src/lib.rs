@@ -6,7 +6,8 @@ use soroban_sdk::{
 };
 
 use remitwise_common::{
-    EventCategory, EventPriority, FamilyRole, RemitwiseEvents, CONTRACT_VERSION,
+    EventCategory, EventPriority, FamilyRole, RemitwiseEvents, RoleGrantedEvent, RoleRevokedEvent,
+    CONTRACT_VERSION,
 };
 
 // Storage TTL constants for active data
@@ -414,9 +415,20 @@ impl FamilyWallet {
             EventPriority::High,
             symbol_short!("member"),
             MemberAddedEvent {
-                member: member_address,
+                member: member_address.clone(),
                 role,
                 spending_limit,
+                timestamp: now,
+            },
+        );
+        RemitwiseEvents::emit(
+            &env,
+            EventCategory::Access,
+            EventPriority::High,
+            symbol_short!("role_grnt"),
+            RoleGrantedEvent {
+                member: member_address,
+                role,
                 timestamp: now,
             },
         );
@@ -1088,6 +1100,18 @@ impl FamilyWallet {
             .instance()
             .set(&symbol_short!("MEMBERS"), &members);
 
+        RemitwiseEvents::emit(
+            &env,
+            EventCategory::Access,
+            EventPriority::High,
+            symbol_short!("role_grnt"),
+            RoleGrantedEvent {
+                member: member.clone(),
+                role,
+                timestamp,
+            },
+        );
+
         Self::append_access_audit(&env, symbol_short!("add_mem"), &caller, Some(member), true);
         true
     }
@@ -1137,13 +1161,29 @@ impl FamilyWallet {
             .get(&symbol_short!("MEMBERS"))
             .unwrap_or_else(|| panic!("Wallet not initialized"));
 
-        members.remove(member.clone());
-        env.storage()
-            .instance()
-            .set(&symbol_short!("MEMBERS"), &members);
+        if let Some(removed_member) = members.get(member.clone()) {
+            members.remove(member.clone());
+            env.storage()
+                .instance()
+                .set(&symbol_short!("MEMBERS"), &members);
 
-        Self::append_access_audit(&env, symbol_short!("rem_mem"), &caller, Some(member), true);
-        true
+            RemitwiseEvents::emit(
+                &env,
+                EventCategory::Access,
+                EventPriority::High,
+                symbol_short!("role_revk"),
+                RoleRevokedEvent {
+                    member: member.clone(),
+                    role: removed_member.role,
+                    timestamp: env.ledger().timestamp(),
+                },
+            );
+
+            Self::append_access_audit(&env, symbol_short!("rem_mem"), &caller, Some(member), true);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn get_pending_transaction(env: Env, tx_id: u64) -> Option<PendingTransaction> {
@@ -1886,6 +1926,17 @@ impl FamilyWallet {
                     added_at: timestamp,
                 },
             );
+            RemitwiseEvents::emit(
+                &env,
+                EventCategory::Access,
+                EventPriority::High,
+                symbol_short!("role_grnt"),
+                RoleGrantedEvent {
+                    member: item.address.clone(),
+                    role: item.role,
+                    timestamp,
+                },
+            );
             Self::append_access_audit(
                 &env,
                 symbol_short!("add_mem"),
@@ -1928,8 +1979,21 @@ impl FamilyWallet {
             if addr.clone() == owner {
                 panic!("Cannot remove owner");
             }
-            if members_map.get(addr.clone()).is_some() {
+            if let Some(removed_member) = members_map.get(addr.clone()) {
                 members_map.remove(addr.clone());
+
+                RemitwiseEvents::emit(
+                    &env,
+                    EventCategory::Access,
+                    EventPriority::High,
+                    symbol_short!("role_revk"),
+                    RoleRevokedEvent {
+                        member: addr.clone(),
+                        role: removed_member.role,
+                        timestamp: env.ledger().timestamp(),
+                    },
+                );
+
                 Self::append_access_audit(
                     &env,
                     symbol_short!("rem_mem"),

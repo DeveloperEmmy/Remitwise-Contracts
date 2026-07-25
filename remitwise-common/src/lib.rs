@@ -15,6 +15,17 @@ pub enum RemitwiseError {
     DuplicateImport = 7,
 }
 
+/// Financial categories for remittance allocation
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum Category {
+    Spending = 1,
+    Savings = 2,
+    Bills = 3,
+    Insurance = 4,
+}
+
 /// Family roles for access control
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -72,6 +83,22 @@ impl EventPriority {
     }
 }
 
+#[contracttype]
+#[derive(Clone)]
+pub struct RoleGrantedEvent {
+    pub member: Address,
+    pub role: FamilyRole,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct RoleRevokedEvent {
+    pub member: Address,
+    pub role: FamilyRole,
+    pub timestamp: u64,
+}
+
 /// Pagination limits
 pub const DEFAULT_PAGE_LIMIT: u32 = 20;
 pub const MAX_PAGE_LIMIT: u32 = 50;
@@ -99,6 +126,38 @@ pub fn clamp_limit(limit: u32) -> u32 {
     } else {
         limit
     }
+}
+
+/// Verifies that `from` is strictly less than `to`.
+///
+/// # Panics
+/// - Panics if `from >= to`.
+pub fn verify_ordered_pair(from: u64, to: u64) {
+    if from >= to {
+        panic!("Invalid range: from ({from}) must be strictly less than to ({to})");
+    }
+}
+
+/// Verifies that the provided signature matches the admin's public key for the given message.
+///
+/// # Arguments
+/// - `env` - Soroban environment
+/// - `admin_pk` - Admin's Ed25519 public key
+/// - `message` - The message that was signed
+/// - `signature` - The Ed25519 signature
+///
+/// # Errors
+/// - `RemitwiseError::InvalidSignature` if the signature verification fails
+pub fn require_signed_by_admin(
+    env: &soroban_sdk::Env,
+    admin_pk: soroban_sdk::crypto::ed25519::PublicKey,
+    message: soroban_sdk::Bytes,
+    signature: soroban_sdk::crypto::ed25519::Signature,
+) -> Result<(), RemitwiseError> {
+    env.crypto()
+        .ed25519_verify(admin_pk, message, signature)
+        .map_err(|_| RemitwiseError::InvalidSignature)?;
+    Ok(())
 }
 
 /// Verifies that the provided signature matches the admin's public key for the given message.
