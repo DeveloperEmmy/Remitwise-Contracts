@@ -2,15 +2,17 @@
 
 use soroban_sdk::{contracttype, symbol_short, Symbol};
 
-/// Financial categories for remittance allocation
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
-pub enum Category {
-    Spending = 1,
-    Savings = 2,
-    Bills = 3,
-    Insurance = 4,
+pub enum RemitwiseError {
+    Unauthorized = 1,
+    InvalidSignature = 2,
+    DeadlineExpired = 3,
+    RequestHashMismatch = 4,
+    InvalidAmount = 5,
+    InvalidNonce = 6,
+    DuplicateImport = 7,
 }
 
 /// Family roles for access control
@@ -99,14 +101,26 @@ pub fn clamp_limit(limit: u32) -> u32 {
     }
 }
 
-/// Verifies that `from` is strictly less than `to`.
+/// Verifies that the provided signature matches the admin's public key for the given message.
 ///
-/// # Panics
-/// - Panics if `from >= to`.
-pub fn verify_ordered_pair(from: u64, to: u64) {
-    if from >= to {
-        panic!("Invalid range: from ({from}) must be strictly less than to ({to})");
-    }
+/// # Arguments
+/// - `env` - Soroban environment
+/// - `admin_pk` - Admin's Ed25519 public key
+/// - `message` - The message that was signed
+/// - `signature` - The Ed25519 signature
+///
+/// # Errors
+/// - `RemitwiseError::InvalidSignature` if the signature verification fails
+pub fn require_signed_by_admin(
+    env: &soroban_sdk::Env,
+    admin_pk: soroban_sdk::crypto::ed25519::PublicKey,
+    message: soroban_sdk::Bytes,
+    signature: soroban_sdk::crypto::ed25519::Signature,
+) -> Result<(), RemitwiseError> {
+    env.crypto()
+        .ed25519_verify(admin_pk, message, signature)
+        .map_err(|_| RemitwiseError::InvalidSignature)?;
+    Ok(())
 }
 
 /// Event emission helper
@@ -197,24 +211,32 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // verify_ordered_pair – boundary and failure tests
+    // require_signed_by_admin – verify signature verification
     // -----------------------------------------------------------------------
-
     #[test]
-    fn verify_ordered_pair_valid_case() {
-        verify_ordered_pair(1, 2);
+    fn require_signed_by_admin_invalid_signature_panics() {
+        let env = Env::default();
+        let (admin_pk, admin_sk) = soroban_sdk::testutils::ed25519::generate(&env);
+        let message = soroban_sdk::Bytes::from_slice(&env, b"test message");
+        
+        // Sign with a different key
+        let (_wrong_pk, wrong_sk) = soroban_sdk::testutils::ed25519::generate(&env);
+        let signature = env.crypto().ed25519_sign(wrong_sk, message.clone());
+        
+        let result = require_signed_by_admin(&env, admin_pk, message, signature);
+        assert_eq!(result, Err(RemitwiseError::InvalidSignature));
     }
 
     #[test]
-    #[should_panic(expected = "Invalid range: from (2) must be strictly less than to (1)")]
-    fn verify_ordered_pair_invalid_case_panic() {
-        verify_ordered_pair(2, 1);
-    }
-
-    #[test]
-    #[should_panic(expected = "Invalid range: from (1) must be strictly less than to (1)")]
-    fn verify_ordered_pair_equal_case_panic() {
-        verify_ordered_pair(1, 1);
+    fn require_signed_by_admin_valid_signature_succeeds() {
+        let env = Env::default();
+        let (admin_pk, admin_sk) = soroban_sdk::testutils::ed25519::generate(&env);
+        let message = soroban_sdk::Bytes::from_slice(&env, b"test message");
+        
+        let signature = env.crypto().ed25519_sign(admin_sk, message.clone());
+        
+        let result = require_signed_by_admin(&env, admin_pk, message, signature);
+        assert!(result.is_ok());
     }
 
     #[test]
