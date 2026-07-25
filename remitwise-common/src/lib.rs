@@ -785,6 +785,10 @@ impl ToI128Checked for i32 {
 /// All Remitwise contracts express percentages in basis points (1 bps = 0.01%)
 /// so that integer arithmetic can be used without floating point.
 pub const BASIS_POINTS: u32 = 10_000;
+/// Number of basis points in a single whole percent.
+pub const BPS_PER_PERCENT: u32 = 100;
+/// Alias for the number of basis points in a single whole percent.
+pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
 
 /// Supported units for externally supplied rate inputs.
 ///
@@ -931,6 +935,21 @@ impl Rate {
     pub fn try_from_input(value: u32, unit: u32) -> Result<Self, RateUnitError> {
         require_supported_rate_unit(unit)?;
         Ok(Self::from_bps(value))
+    }
+
+    /// Construct a `Rate` from a whole percentage value.
+    #[inline(always)]
+    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
+        percent
+            .checked_mul(BPS_PER_PERCENT)
+            .map(Self::from_bps)
+            .ok_or(RateError::Overflow)
+    }
+
+    /// Construct a `Rate` from a `Percent` wrapper.
+    #[inline(always)]
+    pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
+        Self::from_percent(percent.to_percentage())
     }
 
     /// Return the raw basis-point value.
@@ -1325,17 +1344,7 @@ pub enum StableCurrencyError {
 /// This is a defence-in-depth allowlist of well-known stablecoins.
 /// Rebase/deflationary/elastic-supply tokens (e.g., AMPL, OHM, TIME) are intentionally excluded.
 const STABLE_CURRENCIES: &[&str] = &[
-    "USDC",
-    "USDT",
-    "USDP",
-    "BUSD",
-    "GUSD",
-    "TUSD",
-    "USDD",
-    "EURC",
-    "EURS",
-    "DAI",
-    "XLM",
+    "USDC", "USDT", "USDP", "BUSD", "GUSD", "TUSD", "USDD", "EURC", "EURS", "DAI", "XLM",
 ];
 
 /// Validates that a currency symbol represents a supported stable asset.
