@@ -66,7 +66,7 @@ mod mock_fail_savings {
             soroban_sdk::vec![&env, 2500i128, 2500i128, 2500i128, 2500i128]
         }
         pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {
-            panic!("savings step failed");
+            panic!("savings step failed")
         }
         pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {}
         pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {}
@@ -89,7 +89,7 @@ mod mock_fail_bill {
         }
         pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {}
         pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {
-            panic!("bill step failed");
+            panic!("bill step failed")
         }
         pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {}
     }
@@ -112,7 +112,7 @@ mod mock_fail_insurance {
         pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {}
         pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {}
         pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {
-            panic!("insurance step failed");
+            panic!("insurance step failed")
         }
     }
 }
