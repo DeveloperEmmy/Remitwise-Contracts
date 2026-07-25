@@ -99,6 +99,16 @@ pub fn clamp_limit(limit: u32) -> u32 {
     }
 }
 
+/// Verifies that `from` is strictly less than `to`.
+///
+/// # Panics
+/// - Panics if `from >= to`.
+pub fn verify_ordered_pair(from: u64, to: u64) {
+    if from >= to {
+        panic!("Invalid range: from ({from}) must be strictly less than to ({to})");
+    }
+}
+
 /// Event emission helper
 pub struct RemitwiseEvents;
 
@@ -187,8 +197,25 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // clamp_limit – boundary and property tests
+    // verify_ordered_pair – boundary and failure tests
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn verify_ordered_pair_valid_case() {
+        verify_ordered_pair(1, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid range: from (2) must be strictly less than to (1)")]
+    fn verify_ordered_pair_invalid_case_panic() {
+        verify_ordered_pair(2, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid range: from (1) must be strictly less than to (1)")]
+    fn verify_ordered_pair_equal_case_panic() {
+        verify_ordered_pair(1, 1);
+    }
 
     #[test]
     fn clamp_limit_zero_returns_default() {
