@@ -7,7 +7,7 @@ use soroban_sdk::{
 mod utils;
 use utils::u64_to_u32;
 
-pub use remitwise_common::{Category, CoverageType, ToI128Checked, DEFAULT_PAGE_LIMIT};
+pub use remitwise_common::{Category, CoverageType, ToI128Checked, DEFAULT_PAGE_LIMIT, MAX_TOP_N};
 
 // Storage TTL constants
 const DAY_IN_LEDGERS: u32 = 17280;
@@ -36,7 +36,11 @@ pub const MAX_DEP_PAGES: u32 = 20;
 pub const DEP_PAGE_LIMIT: u32 = 50;
 
 /// Maximum number of items included in top-N reports.
-pub const MAX_ITEMS_PER_REPORT: u32 = 10;
+///
+/// Alias for [`remitwise_common::MAX_TOP_N`] so the invariance is
+/// compile-time enforced.  Validated at the top of every top-N endpoint
+/// via [`remitwise_common::require_bounded_top_n`] as defence-in-depth.
+pub const MAX_ITEMS_PER_REPORT: u32 = remitwise_common::MAX_TOP_N;
 
 /// Financial health score (0-100), composed of three weighted components.
 ///
@@ -259,6 +263,8 @@ pub enum ReportingError {
     InvalidPercentageSplit = 8,
     /// u64 to u32 overflow guard
     Overflow = 9,
+    /// Top-N count exceeds the hard cap ([`MAX_ITEMS_PER_REPORT`]).
+    TopNTooLarge = 10,
 }
 
 #[contracttype]
@@ -1657,6 +1663,12 @@ impl ReportingContract {
     ) -> Result<TopNBillsReport, ReportingError> {
         remitwise_common::validate_period(period_start, period_end)
             .map_err(|_| ReportingError::InvalidPeriod)?;
+        // Defence-in-depth: the hardcoded MAX_ITEMS_PER_REPORT must not
+        // exceed the shared MAX_TOP_N cap.  If a future code change
+        // raises MAX_ITEMS_PER_REPORT above MAX_TOP_N, this guard fails
+        // closed rather than letting an oversized N reach the sort loop.
+        remitwise_common::require_bounded_top_n(MAX_ITEMS_PER_REPORT, MAX_TOP_N)
+            .map_err(|_| ReportingError::TopNTooLarge)?;
         user.require_auth();
         Ok(Self::get_top_bills_report_internal(
             &env,
@@ -1752,6 +1764,9 @@ impl ReportingContract {
     ) -> Result<TopNSavingsReport, ReportingError> {
         remitwise_common::validate_period(period_start, period_end)
             .map_err(|_| ReportingError::InvalidPeriod)?;
+        // Defence-in-depth: see [`get_top_bills_report`] for rationale.
+        remitwise_common::require_bounded_top_n(MAX_ITEMS_PER_REPORT, MAX_TOP_N)
+            .map_err(|_| ReportingError::TopNTooLarge)?;
         user.require_auth();
         Ok(Self::get_top_savings_report_internal(
             &env,
