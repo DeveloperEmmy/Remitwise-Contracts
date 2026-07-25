@@ -343,6 +343,7 @@ To run an example, use `cargo run --example <example_name>`:
 - [Audit Trail](docs/AUDIT_TRAIL.md) - How to reconstruct historical state from events alone
 - [Settler Whitelist](docs/SETTLER_WHITELIST.md) - Operator guide: how settlers are added, rotated, and revoked
 - [Killswitch Trust Model](docs/killswitch-trust-model.md) - Who can trigger, who can clear, what state is preserved in the emergency killswitch
+- [Killswitch Epochs](docs/KILL_SWITCH_EPOCHS.md) - Defining emergency epochs and incident lifecycles
 - [Tagging Feature](TAGGING_FEATURE.md) - Tag-based organization system
 - [Threat Model](THREAT_MODEL.md) - Security analysis and mitigations
 - [Entrypoint Threat Breakdown](docs/THREAT_MODEL.md) - STRIDE-style threat analysis per contract entrypoint (contributor-focused)
