@@ -14,12 +14,14 @@
 ///   "travel" both become "travel"), both copies appear in the output. Callers
 ///   that need uniqueness must deduplicate the result themselves.
 extern crate std;
+use std::string::ToString;
 
 use super::*;
 use crate::distribute_pro_rata;
 use ed25519_dalek::Signer;
 use proptest::prelude::*;
 use soroban_sdk::{Bytes, Env, IntoVal, String, Symbol, Vec};
+use soroban_sdk::testutils::{Ledger, LedgerInfo};
 
 fn set_ledger(env: &Env, sequence_number: u32) {
     let proto = env.ledger().protocol_version();

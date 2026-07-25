@@ -786,6 +786,14 @@ impl ToI128Checked for i32 {
 /// so that integer arithmetic can be used without floating point.
 pub const BASIS_POINTS: u32 = 10_000;
 
+/// Basis points per whole percentage: 100 basis points = 1%.
+///
+/// Useful for converting between whole-percentage and basis-point representations.
+pub const BPS_PER_PERCENT: u32 = 100;
+
+/// Alias for [`BPS_PER_PERCENT`]. Same value, more descriptive name.
+pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
+
 /// Supported units for externally supplied rate inputs.
 ///
 /// Remitwise contracts currently accept only basis points. Treating a raw rate
@@ -905,6 +913,7 @@ impl TryFrom<Percent> for Rate {
 /// assert_eq!(rate.apply_to(1000), Ok(50));
 /// assert_eq!(rate.apply_to(i128::MAX), Err(RateError::Overflow));
 /// ```
+/// 
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct Rate(u32);
@@ -921,6 +930,26 @@ impl Rate {
     #[inline(always)]
     pub fn from_bps(bps: u32) -> Self {
         Self(bps)
+    }
+
+    /// Construct a `Rate` from a whole percentage value (not basis points).
+    ///
+    /// Returns `Ok(Rate)` if `percent * 100` fits in `u32`, or
+    /// `Err(RateError::Overflow)` otherwise.
+    #[inline(always)]
+    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
+        percent
+            .checked_mul(BPS_PER_PERCENT)
+            .map(Self)
+            .ok_or(RateError::Overflow)
+    }
+
+    /// Construct a `Rate` from a `Percent` instance.
+    ///
+    /// Returns `Ok(Rate)` if `percent * 100` fits in `u32`, or `Err(RateError::Overflow)` otherwise.
+    #[inline(always)]
+    pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
+        percent.to_rate()
     }
 
     /// Construct a `Rate` from an externally supplied raw value plus unit.
@@ -1405,6 +1434,69 @@ fn symbol_matches_known_case_insensitive(env: &Env, symbol: &Symbol, known: &str
         }
     }
     false
+}
+
+/// Canonicalizes a single label string into a `Symbol`.
+///
+/// Rules:
+/// - Leading and trailing ASCII whitespace is stripped.
+/// - ASCII uppercase letters are folded to lowercase.
+/// - The result must satisfy `Symbol`'s charset (`[a-zA-Z0-9_]` after folding)
+///   and length (`1..=32` bytes after trimming), otherwise this panics.
+///
+/// # Idempotency guarantee
+///
+/// Applying this function twice to any input yields the same `Symbol`:
+/// `canonicalise_symbol(env, &canonicalise_symbol(env, &x).to_string()) == canonicalise_symbol(env, &x)`.
+///
+/// # Whitespace round-trip
+///
+/// Inputs that differ only in leading/trailing whitespace produce identical
+/// canonical `Symbol` values: `"hello"`, `" hello"`, and `"hello "` all map
+/// to `Symbol("hello")`.
+///
+/// # Panics
+///
+/// - On empty or whitespace-only input (after trimming length is 0).
+/// - On input over 32 bytes (after trimming).
+/// - When the trimmed, lowercased content contains bytes outside `[a-z0-9_]`.
+pub fn canonicalise_symbol(env: &Env, input: &soroban_sdk::String) -> Symbol {
+    let len = input.len();
+    if len == 0 {
+        panic!("symbol input must contain between 1 and 32 characters after trimming");
+    }
+    let mut buf = [0u8; 256];
+    if len as usize > buf.len() {
+        panic!("symbol input is too long");
+    }
+    input.copy_into_slice(&mut buf[..len as usize]);
+
+    let s = core::str::from_utf8(&buf[..len as usize])
+        .unwrap_or_else(|_| panic!("symbol input is not valid UTF-8"));
+
+    let trimmed = s.trim();
+    let trimmed_len = trimmed.len();
+    if trimmed_len == 0 {
+        panic!("symbol input must contain at least one non-whitespace character");
+    }
+    if trimmed_len > 32 {
+        panic!("symbol input must contain between 1 and 32 characters after trimming");
+    }
+
+    let trimmed_bytes = trimmed.as_bytes();
+    let mut canonical = [0u8; 32];
+    for (i, &byte) in trimmed_bytes.iter().enumerate() {
+        canonical[i] = if byte.is_ascii_uppercase() {
+            byte.to_ascii_lowercase()
+        } else {
+            byte
+        };
+    }
+
+    let canonical_str = core::str::from_utf8(&canonical[..trimmed_len])
+        .unwrap_or_else(|_| panic!("canonicalised symbol is not valid UTF-8"));
+
+    Symbol::new(env, canonical_str)
 }
 
 /// Event emission helper
