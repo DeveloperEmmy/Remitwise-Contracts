@@ -786,13 +786,42 @@ impl ToI128Checked for i32 {
 /// so that integer arithmetic can be used without floating point.
 pub const BASIS_POINTS: u32 = 10_000;
 
-/// Basis points per 1% percentage point: 100 basis points = 1%.
-pub const BPS_PER_PERCENT: u32 = 100;
+/// Supported units for externally supplied rate inputs.
+///
+/// Remitwise contracts currently accept only basis points. Treating a raw rate
+/// value as unitless would let a caller supply an unexpected denomination and
+/// have the contract silently interpret it as basis points, potentially
+/// magnifying or shrinking fee/discount/allocation calculations. This guard
+/// makes the accepted unit explicit and reject-by-default.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum RateUnit {
+    BasisPoints = 1,
+}
 
-/// Alias for [`BPS_PER_PERCENT`]: 100 basis points = 1%.
-pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
+/// Error returned when an externally supplied rate unit is unsupported.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum RateUnitError {
+    UnsupportedRateUnit = 1,
+}
 
-/// Error returned by [`Rate`] arithmetic or conversion when the operation overflows.
+/// Require that `unit` is one of the rate denominations currently supported by
+/// the contracts.
+///
+/// # Errors
+/// Returns [`RateUnitError::UnsupportedRateUnit`] when `unit` is not accepted.
+#[inline(always)]
+pub fn require_supported_rate_unit(unit: u32) -> Result<RateUnit, RateUnitError> {
+    match unit {
+        1 => Ok(RateUnit::BasisPoints),
+        _ => Err(RateUnitError::UnsupportedRateUnit),
+    }
+}
+
+/// Error returned by [`Rate`] arithmetic when the result overflows `i128`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RateError {
     /// The intermediate or final result exceeds numerical limits (`i128::MAX` or `u32::MAX`).
@@ -894,22 +923,14 @@ impl Rate {
         Self(bps)
     }
 
-    /// Create a `Rate` from a whole percentage integer value (1% = 100 basis points).
+    /// Construct a `Rate` from an externally supplied raw value plus unit.
     ///
-    /// Returns `Ok(Rate)` if `percent * BPS_PER_PERCENT` fits in `u32`, or `Err(RateError::Overflow)` otherwise.
-    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
-        percent
-            .checked_mul(BPS_PER_PERCENT)
-            .map(Self::from_bps)
-            .ok_or(RateError::Overflow)
-    }
-
-    /// Create a `Rate` from a [`Percent`] instance.
-    ///
-    /// Returns `Ok(Rate)` if `percent * BPS_PER_PERCENT` fits in `u32`, or `Err(RateError::Overflow)` otherwise.
+    /// This is the safe entry point for untrusted inputs that carry an explicit
+    /// unit field. Only supported units are accepted.
     #[inline(always)]
-    pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
-        percent.to_rate()
+    pub fn try_from_input(value: u32, unit: u32) -> Result<Self, RateUnitError> {
+        require_supported_rate_unit(unit)?;
+        Ok(Self::from_bps(value))
     }
 
     /// Return the raw basis-point value.
