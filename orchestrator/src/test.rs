@@ -1,6 +1,4 @@
-#![cfg(test)]
-
-extern crate std;
+﻿extern crate std;
 
 use super::*;
 use soroban_sdk::{
@@ -622,8 +620,9 @@ fn test_execute_flow_signed_invalid_amount_zero() {
     let deadline = env.ledger().timestamp() + 1000;
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, 0, deadline);
 
-    let result =
-        client.try_execute_remittance_flow_signed(&executor, &0, &0, &deadline, &hash, &0u64);
+    let result = client.try_execute_remittance_flow_signed(
+        &executor, &0,
+        &0, &deadline, &hash, &0u64,    );
 
     assert_eq!(result, Err(Ok(OrchestratorError::InvalidAmount)));
 }
@@ -640,13 +639,8 @@ fn test_execute_flow_signed_invalid_amount_negative() {
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, -100, deadline);
 
     let result = client.try_execute_remittance_flow_signed(
-        &executor,
-        &(-100i128),
-        &0,
-        &deadline,
-        &hash,
-        &0u64,
-    );
+        &executor, &(-100i128),
+        &0, &deadline, &hash, &0u64,    );
 
     assert_eq!(result, Err(Ok(OrchestratorError::InvalidAmount)));
 }
@@ -663,13 +657,8 @@ fn test_execute_flow_signed_invalid_amount_i128_min() {
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, i128::MIN, deadline);
 
     let result = client.try_execute_remittance_flow_signed(
-        &executor,
-        &(i128::MIN),
-        &0,
-        &deadline,
-        &hash,
-        &0u64,
-    );
+        &executor, &(i128::MIN),
+        &0, &deadline, &hash, &0u64,    );
 
     assert_eq!(result, Err(Ok(OrchestratorError::InvalidAmount)));
 }
@@ -685,8 +674,9 @@ fn test_execute_flow_signed_valid_amount_minimum_positive() {
     let deadline = env.ledger().timestamp() + 1000;
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, 1, deadline);
 
-    let result =
-        client.try_execute_remittance_flow_signed(&executor, &1, &0, &deadline, &hash, &0u64);
+    let result = client.try_execute_remittance_flow_signed(
+        &executor, &1,
+        &0, &deadline, &hash, &0u64,    );
 
     assert!(
         result.is_ok(),
@@ -1982,18 +1972,16 @@ fn test_epoch_mismatch_rejects_stale_token() {
 
     let orchestrator_id = env.register_contract(None, Orchestrator);
     let client = OrchestratorClient::new(&env, &orchestrator_id);
-    let mock_id1 = env.register_contract(None, MockContract);
-    let mock_id2 = env.register_contract(None, MockContract);
-    let mock_id3 = env.register_contract(None, MockContract);
-    let mock_id4 = env.register_contract(None, MockContract);
-    let mock_id5 = env.register_contract(None, MockContract);
     let owner = Address::generate(&env);
     let executor = Address::generate(&env);
 
-    // Initialize orchestrator
-    client.init(
-        &owner, &mock_id1, &mock_id2, &mock_id3, &mock_id4, &mock_id5,
-    );
+    // Initialize orchestrator (each dependency must be a distinct address)
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
 
     // Get current epoch (should be 0)
     let current_epoch = client.get_actor_epoch_public();
@@ -2030,18 +2018,16 @@ fn test_matching_epoch_allows_execution() {
 
     let orchestrator_id = env.register_contract(None, Orchestrator);
     let client = OrchestratorClient::new(&env, &orchestrator_id);
-    let mock_id1 = env.register_contract(None, MockContract);
-    let mock_id2 = env.register_contract(None, MockContract);
-    let mock_id3 = env.register_contract(None, MockContract);
-    let mock_id4 = env.register_contract(None, MockContract);
-    let mock_id5 = env.register_contract(None, MockContract);
     let owner = Address::generate(&env);
     let executor = Address::generate(&env);
 
-    // Initialize orchestrator
-    client.init(
-        &owner, &mock_id1, &mock_id2, &mock_id3, &mock_id4, &mock_id5,
-    );
+    // Initialize orchestrator (each dependency must be a distinct address)
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
 
     // Get current epoch (should be 0)
     let current_epoch = client.get_actor_epoch_public();
@@ -2064,4 +2050,502 @@ fn test_matching_epoch_allows_execution() {
 
     // Should not fail with EpochMismatch (may fail for other reasons like nonce validation)
     assert_ne!(result, Err(Ok(OrchestratorError::EpochMismatch)));
+}
+
+// ---------------------------------------------------------------------------
+// Epoch guard boundary tests: Same / Off-by-one / Wildly different
+// ---------------------------------------------------------------------------
+
+/// After init(), get_actor_epoch_public() returns 0.
+#[test]
+fn epoch_starts_at_zero_after_init() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    assert_eq!(client.get_actor_epoch_public(), 0);
+}
+
+/// Each bump increments the epoch by exactly 1 (off-by-one precision).
+#[test]
+fn bump_actor_epoch_increments_by_exactly_one() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    assert_eq!(client.get_actor_epoch_public(), 0);
+
+    let new_epoch = client.bump_actor_epoch(&owner);
+    assert_eq!(new_epoch, 1);
+    assert_eq!(client.get_actor_epoch_public(), 1);
+
+    let new_epoch = client.bump_actor_epoch(&owner);
+    assert_eq!(new_epoch, 2);
+    assert_eq!(client.get_actor_epoch_public(), 2);
+
+    let new_epoch = client.bump_actor_epoch(&owner);
+    assert_eq!(new_epoch, 3);
+    assert_eq!(client.get_actor_epoch_public(), 3);
+}
+
+/// Multiple sequential bumps accumulate; only the latest epoch is valid.
+#[test]
+fn multiple_bumps_all_reject_stale_tokens() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+    let executor = Address::generate(&env);
+
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    // Bump 0 → 1 → 2 → 3
+    for expected in 1u64..=3 {
+        let new_epoch = client.bump_actor_epoch(&owner);
+        assert_eq!(new_epoch, expected);
+    }
+    assert_eq!(client.get_actor_epoch_public(), 3);
+
+    // Epochs 0, 1, 2 should all be stale after bumping to 3.
+    for stale in 0u64..3 {
+        let result = client.try_execute_remittance_flow_signed(
+            &executor,
+            &10_000i128,
+            &0u64,
+            &10_000u64,
+            &12345u64,
+            &stale,
+        );
+        assert_eq!(
+            result,
+            Err(Ok(OrchestratorError::EpochMismatch)),
+            "epoch {stale} should be rejected when current is 3"
+        );
+    }
+
+    // Epoch 3 (matching) should not be rejected on the epoch check.
+    let result = client.try_execute_remittance_flow_signed(
+        &executor,
+        &10_000i128,
+        &0u64,
+        &10_000u64,
+        &12345u64,
+        &3u64,
+    );
+    assert_ne!(result, Err(Ok(OrchestratorError::EpochMismatch)));
+}
+
+// ---------------------------------------------------------------------------
+// Off-by-one: one step ahead
+// ---------------------------------------------------------------------------
+
+/// Providing epoch that is 1 ahead of current rejects with EpochMismatch.
+#[test]
+fn off_by_one_future_epoch_rejects() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+    let executor = Address::generate(&env);
+
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    // Current epoch is 0; provide 1 (one step ahead).
+    let result = client.try_execute_remittance_flow_signed(
+        &executor,
+        &10_000i128,
+        &0u64,
+        &10_000u64,
+        &12345u64,
+        &1u64,
+    );
+    assert_eq!(result, Err(Ok(OrchestratorError::EpochMismatch)));
+
+    // Bump to 1; now provide 2 (one step ahead).
+    client.bump_actor_epoch(&owner);
+    let result = client.try_execute_remittance_flow_signed(
+        &executor,
+        &10_000i128,
+        &0u64,
+        &10_000u64,
+        &12345u64,
+        &2u64,
+    );
+    assert_eq!(result, Err(Ok(OrchestratorError::EpochMismatch)));
+}
+
+// ---------------------------------------------------------------------------
+// Off-by-one: one step behind (stale by exactly 1)
+// ---------------------------------------------------------------------------
+
+/// Providing epoch that is 1 behind current rejects with EpochMismatch.
+#[test]
+fn off_by_one_stale_epoch_rejects() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+    let executor = Address::generate(&env);
+
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    // Bump to 1; provide 0 (one step behind).
+    client.bump_actor_epoch(&owner);
+    let result = client.try_execute_remittance_flow_signed(
+        &executor,
+        &10_000i128,
+        &0u64,
+        &10_000u64,
+        &12345u64,
+        &0u64,
+    );
+    assert_eq!(result, Err(Ok(OrchestratorError::EpochMismatch)));
+
+    // Bump to 2; provide 1 (one step behind).
+    client.bump_actor_epoch(&owner);
+    let result = client.try_execute_remittance_flow_signed(
+        &executor,
+        &10_000i128,
+        &0u64,
+        &10_000u64,
+        &12345u64,
+        &1u64,
+    );
+    assert_eq!(result, Err(Ok(OrchestratorError::EpochMismatch)));
+}
+
+// ---------------------------------------------------------------------------
+// Wildly different: far-ahead epoch
+// ---------------------------------------------------------------------------
+
+/// Providing u64::MAX when current epoch is 0 rejects with EpochMismatch.
+#[test]
+fn wildly_different_future_epoch_rejects() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+    let executor = Address::generate(&env);
+
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    let result = client.try_execute_remittance_flow_signed(
+        &executor,
+        &10_000i128,
+        &0u64,
+        &10_000u64,
+        &12345u64,
+        &u64::MAX,
+    );
+    assert_eq!(result, Err(Ok(OrchestratorError::EpochMismatch)));
+}
+
+/// Providing 999 when current epoch is 0 rejects with EpochMismatch.
+#[test]
+fn wildly_different_arbitrary_epoch_rejects() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+    let executor = Address::generate(&env);
+
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    let result = client.try_execute_remittance_flow_signed(
+        &executor,
+        &10_000i128,
+        &0u64,
+        &10_000u64,
+        &12345u64,
+        &999u64,
+    );
+    assert_eq!(result, Err(Ok(OrchestratorError::EpochMismatch)));
+}
+
+/// Providing 42 when current epoch is 3 rejects with EpochMismatch.
+#[test]
+fn wildly_different_future_epoch_after_bump_rejects() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+    let executor = Address::generate(&env);
+
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    // Bump to 3
+    client.bump_actor_epoch(&owner);
+    client.bump_actor_epoch(&owner);
+    client.bump_actor_epoch(&owner);
+
+    let result = client.try_execute_remittance_flow_signed(
+        &executor,
+        &10_000i128,
+        &0u64,
+        &10_000u64,
+        &12345u64,
+        &42u64,
+    );
+    assert_eq!(result, Err(Ok(OrchestratorError::EpochMismatch)));
+}
+
+// ---------------------------------------------------------------------------
+// Matching epoch (same) — happy path after bump
+// ---------------------------------------------------------------------------
+
+/// After bump to N, providing N does not fail with EpochMismatch.
+#[test]
+fn same_epoch_after_bump_allows_execution() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+    let executor = Address::generate(&env);
+
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    // Bump to 1
+    client.bump_actor_epoch(&owner);
+    assert_eq!(client.get_actor_epoch_public(), 1);
+
+    let result = client.try_execute_remittance_flow_signed(
+        &executor,
+        &10_000i128,
+        &0u64,
+        &10_000u64,
+        &12345u64,
+        &1u64,
+    );
+    assert_ne!(result, Err(Ok(OrchestratorError::EpochMismatch)));
+}
+
+// ---------------------------------------------------------------------------
+// Bump authorization
+// ---------------------------------------------------------------------------
+
+/// Non-owner cannot bump the epoch.
+#[test]
+fn non_owner_cannot_bump_epoch() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+    let non_owner = Address::generate(&env);
+
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    let result = client.try_bump_actor_epoch(&non_owner);
+    assert_eq!(result, Err(Ok(OrchestratorError::Unauthorized)));
+}
+
+// ---------------------------------------------------------------------------
+// Bump emits event with correct old/new values
+// ---------------------------------------------------------------------------
+
+/// bump_actor_epoch emits an event with (old_epoch, new_epoch).
+#[test]
+fn bump_actor_epoch_emits_event_with_correct_values() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    let new_epoch = client.bump_actor_epoch(&owner);
+    assert_eq!(new_epoch, 1);
+
+    let expected_topics = soroban_sdk::vec![
+        &env,
+        symbol_short!("orch").into_val(&env),
+        symbol_short!("epch_bump").into_val(&env),
+    ];
+
+    let bump_event = env
+        .events()
+        .all()
+        .iter()
+        .find(|(cid, topics, _)| cid == &orchestrator_id && *topics == expected_topics)
+        .expect("epch_bump event missing");
+
+    let payload: (u64, u64) = FromVal::from_val(&env, &bump_event.2);
+    assert_eq!(payload, (0u64, 1u64));
+}
+
+/// Second bump emits event with (1, 2).
+#[test]
+fn second_bump_emits_correct_old_and_new() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    client.bump_actor_epoch(&owner);
+    let new_epoch = client.bump_actor_epoch(&owner);
+    assert_eq!(new_epoch, 2);
+
+    let expected_topics = soroban_sdk::vec![
+        &env,
+        symbol_short!("orch").into_val(&env),
+        symbol_short!("epch_bump").into_val(&env),
+    ];
+
+    let mut bump_payloads: std::vec::Vec<(u64, u64)> = std::vec::Vec::new();
+    for (_, topics, data) in env.events().all().iter() {
+        if topics == expected_topics {
+            let payload: (u64, u64) = FromVal::from_val(&env, &data);
+            bump_payloads.push(payload);
+        }
+    }
+
+    assert_eq!(bump_payloads.len(), 2);
+    assert_eq!(bump_payloads[0], (0u64, 1u64));
+    assert_eq!(bump_payloads[1], (1u64, 2u64));
+}
+
+// ---------------------------------------------------------------------------
+// get_actor_epoch_public reflects bump state
+// ---------------------------------------------------------------------------
+
+/// get_actor_epoch_public returns 0 before any bump, 1 after one bump, etc.
+#[test]
+fn get_actor_epoch_public_reflects_bump_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    assert_eq!(client.get_actor_epoch_public(), 0);
+
+    client.bump_actor_epoch(&owner);
+    assert_eq!(client.get_actor_epoch_public(), 1);
+
+    client.bump_actor_epoch(&owner);
+    assert_eq!(client.get_actor_epoch_public(), 2);
+
+    client.bump_actor_epoch(&owner);
+    assert_eq!(client.get_actor_epoch_public(), 3);
+}
+
+// ---------------------------------------------------------------------------
+// Overflow: bump from u64::MAX
+// ---------------------------------------------------------------------------
+
+/// Bumping the epoch when it is at u64::MAX returns Overflow.
+#[test]
+fn bump_actor_epoch_overflow_returns_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, MockContract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    // Manually set epoch to u64::MAX to test overflow.
+    env.as_contract(&orchestrator_id, || {
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ACT_EPOCH"), &u64::MAX);
+    });
+    assert_eq!(client.get_actor_epoch_public(), u64::MAX);
+
+    let result = client.try_bump_actor_epoch(&owner);
+    assert_eq!(result, Err(Ok(OrchestratorError::Overflow)));
+
+    // Epoch must remain at u64::MAX — the bump must not have mutated storage.
+    assert_eq!(client.get_actor_epoch_public(), u64::MAX);
 }
