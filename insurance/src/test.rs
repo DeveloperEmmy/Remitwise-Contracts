@@ -2,6 +2,7 @@
 #[cfg(test)]
 mod tests {
     use crate::*;
+    use alloc::format;
     use remitwise_common::CoverageType;
     use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, Env, String, Vec};
 
