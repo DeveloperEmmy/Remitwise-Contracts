@@ -6,12 +6,17 @@ Stellar Soroban smart contracts for the RemitWise remittance platform.
 
 This workspace contains the core smart contracts that power RemitWise's post-remittance financial planning features:
 
-- **remittance_split**: Automatically splits remittances into spending, savings, bills, and insurance
-- **savings_goals**: Goal-based savings with target dates and locked funds
-- **bill_payments**: Automated bill payment tracking and scheduling
-- **insurance**: Micro-insurance policy management and premium payments
-- **family_wallet**: Family governance, multisig approvals, and emergency transfer controls
-- **remitwise-common**: Shared types and utilities used across contracts
+- **[remittance_split](remittance_split/README.md)**: Automatically splits remittances into spending, savings, bills, and insurance
+- **[savings_goals](savings_goals/README.md)**: Goal-based savings with target dates and locked funds
+- **[bill_payments](bill_payments/README.md)**: Automated bill payment tracking and scheduling with recurring bill schedule lifecycle
+- **[insurance](insurance/README.md)**: Micro-insurance policy management and premium payments
+- **[family_wallet](family_wallet/README.md)**: Family governance, multisig approvals, and emergency transfer controls
+- **[orchestrator](orchestrator/README.md)**: Cross-contract coordination and execution of end-to-end remittance flows
+- **[reporting](reporting/README.md)**: Financial reporting and insights
+- **[emergency_killswitch](emergency_killswitch/README.md)**: Centralized emergency pause controls across contracts
+- **[remitwise-common](remitwise-common/README.md)**: Shared types and utilities used across contracts
+- **[docs/PERIOD_INVARIANTS.md](docs/PERIOD_INVARIANTS.md)**: Time-bound period invariants, ledger timestamp rules, and execution windows
+- **[docs/AMOUNT_INVARIANTS.md](docs/AMOUNT_INVARIANTS.md)**: Amount zero-handling rules across contract entrypoints
 
 ## Shared Components
 
@@ -71,6 +76,17 @@ See [cli/README.md](cli/README.md) for usage instructions.
 - **analytics**: On-chain analytics and reporting
 - **orchestrator**: Cross-contract coordination
 - **reporting**: Financial reporting and insights
+
+### Entrypoint auth inventory
+
+Use the helper script below to print every public contract entrypoint alongside its detected auth model:
+
+```bash
+python3 scripts/entrypoint_auth_inventory.py
+python3 scripts/entrypoint_auth_inventory.py remittance_split
+```
+
+This is useful for reviewers who want a quick inventory of which entrypoints are authenticated, read-only, or otherwise permissionless.
 
 ## Prerequisites
 
@@ -269,6 +285,8 @@ If you encounter issues with a specific Soroban version:
 ### Additional Resources
 
 - **[UPGRADE_GUIDE.md](UPGRADE_GUIDE.md)** - Comprehensive upgrade procedures and version-specific migration guides
+- **[docs/UPGRADE_RUNBOOK.md](docs/UPGRADE_RUNBOOK.md)** - Step-by-step contract upgrade runbook and rollback plan for operators
+- **[docs/SETTLEMENT_WINDOWS.md](docs/SETTLEMENT_WINDOWS.md)** - Specification of invoice settlement window rules, creation acceptance bounds, overdue semantics, and late catch-up loops
 - **[VERSION_COMPATIBILITY.md](VERSION_COMPATIBILITY.md)** - Detailed compatibility matrix and testing status
 - **[COMPATIBILITY_QUICK_REFERENCE.md](COMPATIBILITY_QUICK_REFERENCE.md)** - Quick reference for common compatibility tasks
 - **[.github/SOROBAN_VERSION_CHECKLIST.md](.github/SOROBAN_VERSION_CHECKLIST.md)** - Validation checklist for new versions
@@ -304,13 +322,34 @@ To run an example, use `cargo run --example <example_name>`:
 
 ## Documentation
 
+- [Contributor Overview](docs/CONTRIBUTOR_OVERVIEW.md) - Onboarding guide for new contributors
+- [ADR: Ban unwrap in Release Builds](docs/adr-ban-unwrap-in-release.md) - Why unwrap and panic are forbidden in production contract code
+- [Changelog](CHANGELOG.md) - Conventional-commits-style log of every release
+- [Token Decimal Catalogue](docs/DECIMAL_CATALOGUE.md) - Reference table of decimals expected for each canonical token
+- [Authorization Matrix](docs/AUTHORIZATION_MATRIX.md) - Per-entrypoint caller authorization requirements for all contracts
+- [Pagination Handbook](docs/PAGINATION_HANDBOOK.md) - How every paginated read is structured, cursor semantics, reviewer checklist, and implementation guide
+- [Pause Playbook](docs/PAUSE_PLAYBOOK.md) - Emergency pause mechanisms and recovery procedures for operators
+- [Committed Hashes](docs/COMMITTED_HASHES.md) - Request-hash coverage and verification guidance for downstream integrators
+- [Zero-Amount Policy](docs/ZERO_AMOUNT_POLICY.md) - Which entrypoints reject, accept, or normalize zero amounts; quick reference for integrators
 - [Family Wallet Design (as implemented)](docs/family-wallet-design.md)
+- [Reporting Admin Rotation](docs/reporting-admin-rotation.md) - Two-step upgrade-admin handoff procedure for reporting dependency configuration
+- [Event Indexing Guide](docs/INDEXING.md) - Mapping contract events to off-chain tables
+- [Financial Health Score Model](docs/HEALTH_SCORE.md) - HealthScore component weights, inputs, clamping, and worked examples
 - [Frontend Integration Notes](docs/frontend-integration.md)
+- [String and Bytes Canonicalisation](docs/CANONICALISATION.md) - Tag casefold, currency trim/uppercase, external-ref charset, and migration checksum byte-order
+- [Type-Safe Percent Conversion](docs/type-safe-percent-conversion.md) - Converting whole percentages to basis points with checked overflow arithmetic
 - [Storage Layout Reference](STORAGE_LAYOUT.md)
+- [Contract Specs & Migrations](docs/MIGRATIONS.md) - How to bump a contract spec without breaking existing storage
 - [Event Indexer](indexer/README.md) - Off-chain event indexing and querying
+- [Audit Trail](docs/AUDIT_TRAIL.md) - How to reconstruct historical state from events alone
+- [Settler Whitelist](docs/SETTLER_WHITELIST.md) - Operator guide: how settlers are added, rotated, and revoked
+- [Killswitch Trust Model](docs/killswitch-trust-model.md) - Who can trigger, who can clear, what state is preserved in the emergency killswitch
 - [Tagging Feature](TAGGING_FEATURE.md) - Tag-based organization system
 - [Threat Model](THREAT_MODEL.md) - Security analysis and mitigations
+- [Entrypoint Threat Breakdown](docs/THREAT_MODEL.md) - STRIDE-style threat analysis per contract entrypoint (contributor-focused)
 - [Security Review Summary](SECURITY_REVIEW_SUMMARY.md)
+- [Event Versioning ADR](docs/events-versioning.md) - Why contract events are versioned via a `_v2` suffix
+- [Event Versioning Discipline](docs/EVENT_VERSIONING.md) - Backward-compatibility rules, migration steps, and indexer guidelines for event schema changes
 
 ## Contracts
 
@@ -373,6 +412,12 @@ Tracks and manages bill payments with recurring support.
 - `restore_bill`: Restore archived bill to active storage
 - `bulk_cleanup_bills`: Permanently delete old archives
 - `get_storage_stats`: Get storage usage statistics
+- `create_bill_schedule`: Create a recurring/one-off bill schedule
+- `modify_bill_schedule`: Modify an existing bill schedule
+- `cancel_bill_schedule`: Cancel an active bill schedule
+- `execute_due_bill_schedules`: Execute all due bill schedules (permissionless)
+- `get_bill_schedules`: Get all schedules for an owner
+- `get_bill_schedule`: Get a specific schedule by ID
 
 **Events:**
 
@@ -382,6 +427,16 @@ Tracks and manages bill payments with recurring support.
   - `bill_id`, `name`, `amount`, `timestamp`
 - `RecurringBillCreatedEvent`: Emitted when a recurring bill generates the next bill
   - `bill_id`, `parent_bill_id`, `name`, `amount`, `due_date`, `timestamp`
+- `ScheduleCreatedEvent`: Emitted when a bill schedule is created
+  - `schedule_id`, `owner`
+- `ScheduleExecutedEvent`: Emitted when a bill schedule is executed
+  - `schedule_id`
+- `ScheduleModifiedEvent`: Emitted when a bill schedule is modified
+  - `schedule_id`
+- `ScheduleCancelledEvent`: Emitted when a bill schedule is cancelled
+  - `schedule_id`
+- `ScheduleMissedEvent`: Emitted when a recurring schedule skips intervals
+  - `schedule_id`, `missed`
 
 ### Insurance
 
@@ -465,6 +520,16 @@ Run tests for all contracts:
 
 ```bash
 cargo test
+```
+
+### Feature Flag Consistency
+
+The CI pipeline includes a feature flag consistency check (`scripts/check_features.py`) that verifies every `cfg(feature = "...")` reference in Rust source code has a corresponding entry in the crate's `[features]` section. This catches stale or misspelled feature gates before they reach production.
+
+Run it locally:
+
+```bash
+python3 scripts/check_features.py
 ```
 
 ### Encrypted migration payload decode safety
@@ -597,6 +662,7 @@ After verifying optimizations:
 ### Documentation
 
 - **[Benchmarking Guide](benchmarks/README.md)**: Complete benchmarking documentation
+- **[Gas Tuning Guide](docs/GAS_TUNING.md)**: How to interpret gas snapshots and optimize costs
 - **[Gas Optimization Guide](docs/gas-optimization.md)**: Optimization strategies and best practices
 - **[Baseline Results](benchmarks/baseline.json)**: Current performance baseline
 - **[Threshold Configuration](benchmarks/thresholds.json)**: Regression detection thresholds
@@ -731,6 +797,8 @@ A comprehensive security review and threat model is available in [THREAT_MODEL.m
 - [SECURITY-003] Add Rate Limiting to Emergency Transfers (HIGH)
 - [SECURITY-004] Replace Checksum with Cryptographic Hash (MEDIUM)
 - [SECURITY-005] Implement Storage Bounds and Entity Limits (MEDIUM)
+
+> **PR Review Checklist:** Before merging security-sensitive PRs, reviewers must complete the [Security Review Checklist](docs/SECURITY_REVIEW.md).
 
 See the [.github/ISSUE_TEMPLATE](.github/ISSUE_TEMPLATE) directory for detailed security issue descriptions.
 

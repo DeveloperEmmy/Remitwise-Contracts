@@ -1,0 +1,1337 @@
+// remitwise-common tests
+
+/// Tests for [`canonicalize_tags`], [`canonicalize_tags_checked`], and [`clamp_limit`].
+///
+/// # Canonicalization contract (pinned here)
+/// - ASCII uppercase letters are silently folded to lowercase.
+/// - Allowed charset after folding: `[a-z0-9\-_]`.
+/// - Any other byte causes the `on_invalid_char` closure to be invoked
+///   (typically a panic or `panic_with_error!` at the call site).
+/// - Tag length must be in `1..=TAG_MAX_LEN` (32) bytes; 0 or >32 panics.
+/// - An empty tag batch (zero tags) panics.
+/// - Output order matches input order; the function does **not** deduplicate.
+///   If two input tags canonicalize to the same string (e.g. "Travel" and
+///   "travel" both become "travel"), both copies appear in the output. Callers
+///   that need uniqueness must deduplicate the result themselves.
+extern crate std;
+
+use super::*;
+use crate::distribute_pro_rata;
+use ed25519_dalek::Signer;
+use proptest::prelude::*;
+use soroban_sdk::{Bytes, Env, IntoVal, String, Symbol, Vec};
+
+fn set_ledger(env: &Env, sequence_number: u32) {
+    let proto = env.ledger().protocol_version();
+    env.ledger().set(LedgerInfo {
+        protocol_version: proto,
+        sequence_number,
+        timestamp: 1_700_000_000,
+        network_id: [0; 32],
+        base_reserve: 10,
+        min_temp_entry_ttl: 1,
+        min_persistent_entry_ttl: 1,
+        max_entry_ttl: 3_000_000,
+    });
+}
+
+// helper: build a single-element tag Vec
+fn single(env: &Env, tag: &str) -> Vec<String> {
+    let mut v = Vec::new(env);
+    v.push_back(String::from_str(env, tag));
+    v
+}
+
+// helper: build a multi-element tag Vec from a slice of &str
+fn tags(env: &Env, items: &[&str]) -> Vec<String> {
+    let mut v = Vec::new(env);
+    for &s in items {
+        v.push_back(String::from_str(env, s));
+    }
+    v
+}
+
+// helper: extract the nth tag as a std::String for assertions
+fn get(_env: &Env, v: &Vec<String>, i: u32) -> std::string::String {
+    let s = v.get(i).unwrap();
+    let mut buf = std::vec![0u8; s.len() as usize];
+    s.copy_into_slice(&mut buf);
+    std::string::String::from_utf8(buf).unwrap()
+}
+
+// ─── canonicalize_tags: lowercasing ──────────────────────────────────────────
+
+/// Uppercase letters are folded to lowercase.
+#[test]
+fn test_canonicalize_uppercase_folded_to_lowercase() {
+    let env = Env::default();
+    let out = canonicalize_tags(&env, &single(&env, "Travel"), || panic!("invalid"));
+    assert_eq!(out.len(), 1);
+    assert_eq!(get(&env, &out, 0), "travel");
+}
+
+/// ALL-CAPS tag is fully lowercased.
+#[test]
+fn test_canonicalize_all_caps_tag() {
+    let env = Env::default();
+    let out = canonicalize_tags(&env, &single(&env, "FIRE"), || panic!("invalid"));
+    assert_eq!(get(&env, &out, 0), "fire");
+}
+
+/// Mixed-case tag is fully lowercased.
+#[test]
+fn test_canonicalize_mixed_case_tag() {
+    let env = Env::default();
+    let out = canonicalize_tags(&env, &single(&env, "MyGoal"), || panic!("invalid"));
+    assert_eq!(get(&env, &out, 0), "mygoal");
+}
+
+/// Already-lowercase tag passes through unchanged.
+#[test]
+fn test_canonicalize_lowercase_passthrough() {
+    let env = Env::default();
+    let out = canonicalize_tags(&env, &single(&env, "travel"), || panic!("invalid"));
+    assert_eq!(get(&env, &out, 0), "travel");
+}
+
+// ─── canonicalize_tags: valid charset ────────────────────────────────────────
+
+/// Digits are allowed.
+#[test]
+fn test_canonicalize_digits_allowed() {
+    let env = Env::default();
+    let out = canonicalize_tags(&env, &single(&env, "goal2025"), || panic!("invalid"));
+    assert_eq!(get(&env, &out, 0), "goal2025");
+}
+
+/// Hyphens are allowed.
+#[test]
+fn test_canonicalize_hyphen_allowed() {
+    let env = Env::default();
+    let out = canonicalize_tags(&env, &single(&env, "long-term"), || panic!("invalid"));
+    assert_eq!(get(&env, &out, 0), "long-term");
+}
+
+/// Underscores are allowed.
+#[test]
+fn test_canonicalize_underscore_allowed() {
+    let env = Env::default();
+    let out = canonicalize_tags(&env, &single(&env, "my_goal"), || panic!("invalid"));
+    assert_eq!(get(&env, &out, 0), "my_goal");
+}
+
+/// A tag using all allowed character classes together passes.
+#[test]
+fn test_canonicalize_mixed_valid_chars() {
+    let env = Env::default();
+    let out = canonicalize_tags(&env, &single(&env, "my-tag_01"), || panic!("invalid"));
+    assert_eq!(get(&env, &out, 0), "my-tag_01");
+}
+
+/// Single-character tag is valid.
+#[test]
+fn test_canonicalize_single_char_tag() {
+    let env = Env::default();
+    let out = canonicalize_tags(&env, &single(&env, "a"), || panic!("invalid"));
+    assert_eq!(get(&env, &out, 0), "a");
+}
+
+// ─── canonicalize_tags: invalid charset ──────────────────────────────────────
+
+/// Space character triggers on_invalid_char.
+#[test]
+#[should_panic(expected = "invalid char: space")]
+fn test_canonicalize_space_triggers_callback() {
+    let env = Env::default();
+    canonicalize_tags(&env, &single(&env, "my goal"), || {
+        panic!("invalid char: space")
+    });
+}
+
+/// `@` symbol triggers on_invalid_char.
+#[test]
+#[should_panic(expected = "invalid char: at")]
+fn test_canonicalize_at_symbol_triggers_callback() {
+    let env = Env::default();
+    canonicalize_tags(&env, &single(&env, "user@domain"), || {
+        panic!("invalid char: at")
+    });
+}
+
+/// Dot (`.`) triggers on_invalid_char — common mistake.
+#[test]
+#[should_panic(expected = "invalid char: dot")]
+fn test_canonicalize_dot_triggers_callback() {
+    let env = Env::default();
+    canonicalize_tags(&env, &single(&env, "goal.2025"), || {
+        panic!("invalid char: dot")
+    });
+}
+
+/// Exclamation mark triggers on_invalid_char.
+#[test]
+#[should_panic(expected = "invalid char")]
+fn test_canonicalize_exclamation_triggers_callback() {
+    let env = Env::default();
+    canonicalize_tags(&env, &single(&env, "urgent!"), || panic!("invalid char"));
+}
+
+/// Hash (`#`) triggers on_invalid_char.
+#[test]
+#[should_panic(expected = "invalid char")]
+fn test_canonicalize_hash_triggers_callback() {
+    let env = Env::default();
+    canonicalize_tags(&env, &single(&env, "#savings"), || panic!("invalid char"));
+}
+
+// ─── canonicalize_tags: length boundaries ────────────────────────────────────
+
+/// A 32-character tag (TAG_MAX_LEN) passes without error.
+#[test]
+fn test_canonicalize_tag_exactly_32_chars_passes() {
+    let env = Env::default();
+    // Exactly 32 lowercase ASCII letters.
+    let tag = "abcdefghijklmnopqrstuvwxyzabcdef"; // 32 chars
+    assert_eq!(tag.len(), 32);
+    let out = canonicalize_tags(&env, &single(&env, tag), || panic!("invalid"));
+    assert_eq!(get(&env, &out, 0), tag);
+}
+
+/// A 33-character tag (one over TAG_MAX_LEN) panics with the length message.
+#[test]
+#[should_panic(expected = "Tag must be between 1 and 32 characters")]
+fn test_canonicalize_tag_33_chars_panics() {
+    let env = Env::default();
+    let tag = "abcdefghijklmnopqrstuvwxyzabcdefg"; // 33 chars
+    assert_eq!(tag.len(), 33);
+    canonicalize_tags(&env, &single(&env, tag), || panic!("invalid"));
+}
+
+/// An empty string tag (len = 0) panics with the length message.
+#[test]
+#[should_panic(expected = "Tag must be between 1 and 32 characters")]
+fn test_canonicalize_empty_string_tag_panics() {
+    let env = Env::default();
+    canonicalize_tags(&env, &single(&env, ""), || panic!("invalid"));
+}
+
+// ─── canonicalize_tags: empty batch ──────────────────────────────────────────
+
+/// Passing an empty Vec panics with the empty-batch message.
+#[test]
+#[should_panic(expected = "Tags cannot be empty")]
+fn test_canonicalize_empty_batch_panics() {
+    let env = Env::default();
+    let empty: Vec<String> = Vec::new(&env);
+    canonicalize_tags(&env, &empty, || panic!("invalid"));
+}
+
+// ─── canonicalize_tags: batch behaviour ──────────────────────────────────────
+
+/// Multiple tags in one batch are all individually normalized.
+#[test]
+fn test_canonicalize_multiple_tags_all_normalized() {
+    let env = Env::default();
+    let input = tags(&env, &["Travel", "FIRE", "long-term"]);
+    let out = canonicalize_tags(&env, &input, || panic!("invalid"));
+    assert_eq!(out.len(), 3);
+    assert_eq!(get(&env, &out, 0), "travel");
+    assert_eq!(get(&env, &out, 1), "fire");
+    assert_eq!(get(&env, &out, 2), "long-term");
+}
+
+/// Output order matches input order.
+#[test]
+fn test_canonicalize_order_preserved() {
+    let env = Env::default();
+    let input = tags(&env, &["zebra", "apple", "mango"]);
+    let out = canonicalize_tags(&env, &input, || panic!("invalid"));
+    assert_eq!(get(&env, &out, 0), "zebra");
+    assert_eq!(get(&env, &out, 1), "apple");
+    assert_eq!(get(&env, &out, 2), "mango");
+}
+
+/// canonicalize_tags does NOT deduplicate: "Travel" and "travel" both become
+/// "travel" and both appear in the output (len == 2, not 1).
+/// Callers that need unique tags must deduplicate the result themselves.
+#[test]
+fn test_canonicalize_does_not_deduplicate() {
+    let env = Env::default();
+    let input = tags(&env, &["Travel", "travel"]);
+    let out = canonicalize_tags(&env, &input, || panic!("invalid"));
+    assert_eq!(
+        out.len(),
+        2,
+        "canonicalize_tags must not deduplicate — deduplication is the caller's responsibility"
+    );
+    assert_eq!(get(&env, &out, 0), "travel");
+    assert_eq!(get(&env, &out, 1), "travel");
+}
+
+/// One invalid tag in a batch causes on_invalid_char to fire even when
+/// preceding tags in the same batch were valid.
+#[test]
+#[should_panic(expected = "invalid char")]
+fn test_canonicalize_invalid_tag_in_batch_fires_callback() {
+    let env = Env::default();
+    // First tag is valid; second has a space.
+    let input = tags(&env, &["valid", "bad tag"]);
+    canonicalize_tags(&env, &input, || panic!("invalid char"));
+}
+
+// ─── canonicalize_tags_checked: success paths ──────────────────────────────
+
+#[test]
+fn test_checked_normalizes_valid_tags() {
+    let env = Env::default();
+    let input = tags(&env, &["Travel", "FIRE", "long-term"]);
+    let out = canonicalize_tags_checked(&env, &input).unwrap();
+    assert_eq!(out.len(), 3);
+    assert_eq!(get(&env, &out, 0), "travel");
+    assert_eq!(get(&env, &out, 1), "fire");
+    assert_eq!(get(&env, &out, 2), "long-term");
+}
+
+#[test]
+fn test_checked_tag_exactly_32_chars_passes() {
+    let env = Env::default();
+    let tag = "abcdefghijklmnopqrstuvwxyzabcdef";
+    assert_eq!(tag.len(), 32);
+    let out = canonicalize_tags_checked(&env, &single(&env, tag)).unwrap();
+    assert_eq!(get(&env, &out, 0), tag);
+}
+
+#[test]
+fn test_checked_does_not_deduplicate() {
+    let env = Env::default();
+    let input = tags(&env, &["Travel", "travel"]);
+    let out = canonicalize_tags_checked(&env, &input).unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(get(&env, &out, 0), "travel");
+    assert_eq!(get(&env, &out, 1), "travel");
+}
+
+// ─── canonicalize_tags_checked: error paths ──────────────────────────────────
+
+#[test]
+fn test_checked_empty_batch_returns_empty() {
+    let env = Env::default();
+    let empty: Vec<String> = Vec::new(&env);
+    assert_eq!(
+        canonicalize_tags_checked(&env, &empty),
+        Err(TagError::Empty)
+    );
+}
+
+#[test]
+fn test_checked_empty_string_tag_returns_empty() {
+    let env = Env::default();
+    assert_eq!(
+        canonicalize_tags_checked(&env, &single(&env, "")),
+        Err(TagError::Empty)
+    );
+}
+
+#[test]
+fn test_checked_tag_33_chars_returns_too_long() {
+    let env = Env::default();
+    let tag = "abcdefghijklmnopqrstuvwxyzabcdefg";
+    assert_eq!(tag.len(), 33);
+    assert_eq!(
+        canonicalize_tags_checked(&env, &single(&env, tag)),
+        Err(TagError::TooLong)
+    );
+}
+
+#[test]
+fn test_checked_invalid_char_at_position_zero() {
+    let env = Env::default();
+    assert_eq!(
+        canonicalize_tags_checked(&env, &single(&env, "#savings")),
+        Err(TagError::InvalidChar { position: 0 })
+    );
+}
+
+#[test]
+fn test_checked_invalid_char_at_last_position() {
+    let env = Env::default();
+    let tag = "valid!";
+    let last = (tag.len() - 1) as u32;
+    assert_eq!(
+        canonicalize_tags_checked(&env, &single(&env, tag)),
+        Err(TagError::InvalidChar { position: last })
+    );
+}
+
+#[test]
+fn test_checked_short_circuits_on_first_invalid_char() {
+    let env = Env::default();
+    // '!' is at position 3; a later space at position 4 must not be reported.
+    assert_eq!(
+        canonicalize_tags_checked(&env, &single(&env, "bad! tag")),
+        Err(TagError::InvalidChar { position: 3 })
+    );
+}
+
+#[test]
+fn test_checked_invalid_tag_in_batch_short_circuits() {
+    let env = Env::default();
+    let input = tags(&env, &["valid", "bad tag"]);
+    assert_eq!(
+        canonicalize_tags_checked(&env, &input),
+        Err(TagError::InvalidChar { position: 3 })
+    );
+}
+
+#[test]
+fn test_checked_empty_batch_before_length_check() {
+    let env = Env::default();
+    let empty: Vec<String> = Vec::new(&env);
+    let err = canonicalize_tags_checked(&env, &empty).unwrap_err();
+    assert_eq!(err, TagError::Empty);
+}
+
+// ─── canonicalise_symbol ──────────────────────────────────────────────────────
+
+/// A deterministic helper: get string content from a Symbol for assertions.
+/// Available only in non-WASM (test) builds via `ToString`.
+fn symbol_str(sym: &Symbol) -> std::string::String {
+    sym.to_string()
+}
+
+/// Lowercase-only input passes through unchanged.
+#[test]
+fn test_canonicalise_symbol_lowercase_passthrough() {
+    let env = Env::default();
+    let input = soroban_sdk::String::from_str(&env, "hello");
+    let out = canonicalise_symbol(&env, &input);
+    assert_eq!(symbol_str(&out), "hello");
+}
+
+/// Uppercase letters are folded to lowercase.
+#[test]
+fn test_canonicalise_symbol_uppercase_folded() {
+    let env = Env::default();
+    let input = soroban_sdk::String::from_str(&env, "HELLO");
+    let out = canonicalise_symbol(&env, &input);
+    assert_eq!(symbol_str(&out), "hello");
+}
+
+/// Mixed case is fully lowercased.
+#[test]
+fn test_canonicalise_symbol_mixed_case() {
+    let env = Env::default();
+    let input = soroban_sdk::String::from_str(&env, "HelloWorld");
+    let out = canonicalise_symbol(&env, &input);
+    assert_eq!(symbol_str(&out), "helloworld");
+}
+
+/// Leading whitespace is stripped.
+#[test]
+fn test_canonicalise_symbol_leading_whitespace_stripped() {
+    let env = Env::default();
+    let input = soroban_sdk::String::from_str(&env, "  hello");
+    let out = canonicalise_symbol(&env, &input);
+    assert_eq!(symbol_str(&out), "hello");
+}
+
+/// Trailing whitespace is stripped.
+#[test]
+fn test_canonicalise_symbol_trailing_whitespace_stripped() {
+    let env = Env::default();
+    let input = soroban_sdk::String::from_str(&env, "hello  ");
+    let out = canonicalise_symbol(&env, &input);
+    assert_eq!(symbol_str(&out), "hello");
+}
+
+/// Whitespace on both sides is stripped.
+#[test]
+fn test_canonicalise_symbol_surrounding_whitespace_stripped() {
+    let env = Env::default();
+    let input = soroban_sdk::String::from_str(&env, "  hello_World  ");
+    let out = canonicalise_symbol(&env, &input);
+    assert_eq!(symbol_str(&out), "hello_world");
+}
+
+/// Underscore is a valid Symbol character.
+#[test]
+fn test_canonicalise_symbol_underscore_allowed() {
+    let env = Env::default();
+    let input = soroban_sdk::String::from_str(&env, "my_symbol");
+    let out = canonicalise_symbol(&env, &input);
+    assert_eq!(symbol_str(&out), "my_symbol");
+}
+
+/// Digits are valid Symbol characters.
+#[test]
+fn test_canonicalise_symbol_digits_allowed() {
+    let env = Env::default();
+    let input = soroban_sdk::String::from_str(&env, "goal2025");
+    let out = canonicalise_symbol(&env, &input);
+    assert_eq!(symbol_str(&out), "goal2025");
+}
+
+/// Function is idempotent: applying twice yields the same Symbol.
+#[test]
+fn test_canonicalise_symbol_idempotent() {
+    let env = Env::default();
+    let input = soroban_sdk::String::from_str(&env, "  HeLLo_WORLD  ");
+    let once = canonicalise_symbol(&env, &input);
+    let once_str = symbol_str(&once);
+    let twice_input = soroban_sdk::String::from_str(&env, &once_str);
+    let twice = canonicalise_symbol(&env, &twice_input);
+    assert_eq!(symbol_str(&once), symbol_str(&twice));
+}
+
+/// Space-only input panics.
+#[test]
+#[should_panic(expected = "non-whitespace character")]
+fn test_canonicalise_symbol_whitespace_only_panics() {
+    let env = Env::default();
+    let input = soroban_sdk::String::from_str(&env, "   ");
+    canonicalise_symbol(&env, &input);
+}
+
+/// Empty input panics.
+#[test]
+#[should_panic(expected = "symbol input must contain between 1 and 32 characters")]
+fn test_canonicalise_symbol_empty_panics() {
+    let env = Env::default();
+    let input = soroban_sdk::String::from_str(&env, "");
+    canonicalise_symbol(&env, &input);
+}
+
+/// Input with invalid Symbol character (hyphen) panics.
+#[test]
+#[should_panic]
+fn test_canonicalise_symbol_hyphen_invalid() {
+    let env = Env::default();
+    let input = soroban_sdk::String::from_str(&env, "hello-world");
+    canonicalise_symbol(&env, &input);
+}
+
+/// Input with invalid Symbol character (space inside) panics.
+#[test]
+#[should_panic]
+fn test_canonicalise_symbol_internal_space_invalid() {
+    let env = Env::default();
+    let input = soroban_sdk::String::from_str(&env, "hello world");
+    canonicalise_symbol(&env, &input);
+}
+
+proptest! {
+    /// Property test for `canonicalise_symbol`.
+    ///
+    /// Pins the canonicalization contract:
+    /// 1. **Idempotence** — applying the function twice yields the same Symbol.
+    /// 2. **Whitespace stripping** — leading/trailing whitespace is removed.
+    /// 3. **Case folding** — ASCII uppercase letters are lowered.
+    /// 4. **Length discipline** — input must be 1..=32 bytes after trimming.
+    #[test]
+    fn proptest_canonicalise_symbol_contract(
+        s in proptest::string::string_regex(" *[a-zA-Z0-9_]+ *").unwrap(),
+    ) {
+        let trimmed = s.trim();
+        let trimmed_len = trimmed.len();
+        // Skip strings longer than 32 bytes after trimming (Symbol max length).
+        if trimmed_len > 32 {
+            return Ok(());
+        }
+
+        let env = Env::default();
+        let input = soroban_sdk::String::from_str(&env, &s);
+        let once = canonicalise_symbol(&env, &input);
+        let once_str = symbol_str(&once);
+
+        // Property 1: idempotence — second application yields the same Symbol.
+        let twice_input = soroban_sdk::String::from_str(&env, &once_str);
+        let twice = canonicalise_symbol(&env, &twice_input);
+        prop_assert_eq!(once.clone(), twice);
+
+        // Property 2: whitespace was stripped — output equals
+        // canonicalising the trimmed form directly.
+        let trimmed_input = soroban_sdk::String::from_str(&env, trimmed);
+        let from_trimmed = canonicalise_symbol(&env, &trimmed_input);
+        prop_assert_eq!(once, from_trimmed);
+
+        // Property 3: output contains only lowercase ASCII letters, digits, underscores.
+        prop_assert!(
+            once_str.len() == trimmed_len,
+            "output length must equal trimmed input length (no chars added/removed)"
+        );
+        for b in once_str.bytes() {
+            prop_assert!(
+                b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_',
+                "canonical output char {:?} is not in [a-z0-9_]",
+                b as char
+            );
+        }
+    }
+}
+
+// ─── clamp_limit ─────────────────────────────────────────────────────────────
+
+/// 0 is treated as "use default" and returns DEFAULT_PAGE_LIMIT.
+#[test]
+fn test_clamp_limit_zero_returns_default() {
+    assert_eq!(clamp_limit(0), DEFAULT_PAGE_LIMIT);
+}
+
+/// 1 is within range and passes through.
+#[test]
+fn test_clamp_limit_one_passthrough() {
+    assert_eq!(clamp_limit(1), 1);
+}
+
+/// A mid-range value passes through unchanged.
+#[test]
+fn test_clamp_limit_mid_range_passthrough() {
+    assert_eq!(clamp_limit(25), 25);
+}
+
+/// MAX_PAGE_LIMIT itself passes through (inclusive upper bound).
+#[test]
+fn test_clamp_limit_max_page_limit_passthrough() {
+    assert_eq!(clamp_limit(MAX_PAGE_LIMIT), MAX_PAGE_LIMIT);
+}
+
+/// One above MAX_PAGE_LIMIT is capped at MAX_PAGE_LIMIT.
+#[test]
+fn test_clamp_limit_one_above_max_clamped() {
+    assert_eq!(clamp_limit(MAX_PAGE_LIMIT + 1), MAX_PAGE_LIMIT);
+}
+
+/// u32::MAX is capped at MAX_PAGE_LIMIT.
+#[test]
+fn test_clamp_limit_u32_max_clamped() {
+    assert_eq!(clamp_limit(u32::MAX), MAX_PAGE_LIMIT);
+}
+
+proptest! {
+    /// Property test for the shared pagination limit normalizer.
+    ///
+    /// This pins the full contract consumed by paginated reads across contracts:
+    /// zero selects the default, oversized limits clamp to the maximum, in-range
+    /// values pass through, output remains bounded, and normalization is idempotent.
+    #[test]
+    fn proptest_clamp_limit_contract(limit in any::<u32>()) {
+        let clamped = clamp_limit(limit);
+
+        if limit == 0 {
+            prop_assert_eq!(clamped, DEFAULT_PAGE_LIMIT);
+        } else if limit > MAX_PAGE_LIMIT {
+            prop_assert_eq!(clamped, MAX_PAGE_LIMIT);
+        } else {
+            prop_assert_eq!(clamped, limit);
+        }
+
+        prop_assert!((1..=MAX_PAGE_LIMIT).contains(&clamped));
+        prop_assert_eq!(clamp_limit(clamped), clamped);
+    }
+}
+
+/// Explicit regression pin for the largest u32 input: it must clamp without
+/// overflow or special-case caller handling.
+#[test]
+fn test_clamp_limit_u32_max_contract_regression() {
+    let clamped = clamp_limit(u32::MAX);
+
+    assert_eq!(clamped, MAX_PAGE_LIMIT);
+    assert!((1..=MAX_PAGE_LIMIT).contains(&clamped));
+    assert_eq!(clamp_limit(clamped), clamped);
+}
+
+// ─── Timestamp::seconds_until ────────────────────────────────────────────────
+
+/// A future target returns the exact distance in seconds.
+#[test]
+fn test_timestamp_seconds_until_future_target() {
+    assert_eq!(Timestamp::seconds_until(1_700_000_000, 1_700_000_300), 300);
+}
+
+/// A target equal to now has no remaining distance.
+#[test]
+fn test_timestamp_seconds_until_equal_target() {
+    assert_eq!(Timestamp::seconds_until(1_700_000_000, 1_700_000_000), 0);
+}
+
+/// A past target saturates at zero instead of underflowing.
+#[test]
+fn test_timestamp_seconds_until_past_target_saturates() {
+    assert_eq!(Timestamp::seconds_until(1_700_000_300, 1_700_000_000), 0);
+}
+
+/// The helper remains overflow-safe at the upper `u64` boundary.
+#[test]
+fn test_timestamp_seconds_until_u64_max_boundary() {
+    assert_eq!(Timestamp::seconds_until(u64::MAX - 1, u64::MAX), 1);
+}
+
+// ─── verify_signature tests ──────────────────────────────────────────────────
+
+#[test]
+fn test_verify_signature_valid() {
+    let env = Env::default();
+    let domain = b"test-domain";
+    let message = b"hello world";
+
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key().to_bytes();
+
+    // Sign the prefixed message
+    let mut prefixed = std::vec::Vec::new();
+    prefixed.extend_from_slice(domain);
+    prefixed.extend_from_slice(message);
+    let signature = sk.sign(&prefixed).to_bytes();
+
+    register_verifier(&env, &pk).unwrap();
+
+    let result = verify_signature(&env, domain, message, &signature, &pk);
+    assert_eq!(result, Ok(()));
+}
+
+#[test]
+fn test_verify_signature_rejects_unregistered_verifier() {
+    let env = Env::default();
+    let domain = b"test-domain";
+    let message = b"hello world";
+
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key().to_bytes();
+    let mut prefixed = std::vec::Vec::new();
+    prefixed.extend_from_slice(domain);
+    prefixed.extend_from_slice(message);
+    let signature = sk.sign(&prefixed).to_bytes();
+
+    let result = verify_signature(&env, domain, message, &signature, &pk);
+    assert_eq!(result, Err(SignatureError::UnregisteredVerifier));
+}
+
+#[test]
+#[should_panic]
+fn test_verify_signature_invalid_signature() {
+    let env = Env::default();
+    let domain = b"test-domain";
+    let message = b"hello world";
+
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key().to_bytes();
+    let invalid_signature = [0u8; 64];
+
+    register_verifier(&env, &pk).unwrap();
+
+    let _ = verify_signature(&env, domain, message, &invalid_signature, &pk);
+}
+
+#[test]
+fn test_verify_signature_invalid_signature_length() {
+    let env = Env::default();
+    let domain = b"test-domain";
+    let message = b"hello world";
+
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key().to_bytes();
+    let short_signature = [0u8; 32];
+
+    register_verifier(&env, &pk).unwrap();
+
+    let result = verify_signature(&env, domain, message, &short_signature, &pk);
+    assert_eq!(result, Err(SignatureError::InvalidSignatureLength));
+}
+
+#[test]
+fn test_verify_signature_invalid_public_key_length() {
+    let env = Env::default();
+    let domain = b"test-domain";
+    let message = b"hello world";
+
+    let short_pk = [0u8; 16];
+    let signature = [0u8; 64];
+
+    let result = verify_signature(&env, domain, message, &signature, &short_pk);
+    assert_eq!(result, Err(SignatureError::InvalidPublicKeyLength));
+}
+
+#[test]
+#[should_panic]
+fn test_verify_signature_wrong_domain() {
+    let env = Env::default();
+    let domain1 = b"domain1";
+    let domain2 = b"domain2";
+    let message = b"hello world";
+
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key().to_bytes();
+
+    let mut prefixed = std::vec::Vec::new();
+    prefixed.extend_from_slice(domain1);
+    prefixed.extend_from_slice(message);
+    let signature = sk.sign(&prefixed).to_bytes();
+
+    register_verifier(&env, &pk).unwrap();
+
+    let _ = verify_signature(&env, domain2, message, &signature, &pk);
+}
+
+#[test]
+fn test_verify_slash_signature_valid() {
+    let env = Env::default();
+    let message = b"slash payload";
+
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key().to_bytes();
+
+    let mut prefixed = std::vec::Vec::new();
+    prefixed.extend_from_slice(b"slash-auth");
+    prefixed.extend_from_slice(message);
+    let signature = sk.sign(&prefixed).to_bytes();
+
+    register_verifier(&env, &pk).unwrap();
+
+    // Verify the slash signature
+    let result = verify_slash_signature(&env, message, Some(&signature), &pk);
+    assert_eq!(result, Ok(()));
+}
+
+#[test]
+fn test_verify_slash_signature_optional_none() {
+    let env = Env::default();
+    let message = b"slash payload";
+    let pk = [0u8; 32];
+
+    // Verify when signature is None (should succeed as it's optional)
+    let result = verify_slash_signature(&env, message, None, &pk);
+    assert_eq!(result, Ok(()));
+}
+
+#[test]
+#[should_panic]
+fn test_verify_slash_signature_invalid() {
+    let env = Env::default();
+    let message = b"slash payload";
+
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key().to_bytes();
+    let invalid_signature = [0u8; 64]; // Invalid
+
+    register_verifier(&env, &pk).unwrap();
+
+    // Verify the invalid slash signature
+    let result = verify_slash_signature(&env, message, Some(&invalid_signature), &pk);
+    assert_eq!(result, Err(SlashError::InvalidSignature));
+}
+
+// ─── distribute_pro_rata tests (#1085) ───────────────────────────────────────
+
+/// Distributes an indivisible total across unequal weights — remainder benefits smallest recipient.
+#[test]
+fn distributes_indivisible_total_with_remainder_to_last_bucket() {
+    let mut out = [0i128; 4];
+    distribute_pro_rata(100, &[50, 30, 15, 5], 100, &mut out);
+
+    // First three buckets receive their floor share
+    assert_eq!(out[0], 50); // 100 * 50 / 100 = 50
+    assert_eq!(out[1], 30); // 100 * 30 / 100 = 30
+    assert_eq!(out[2], 15); // 100 * 15 / 100 = 15
+    assert_eq!(out[3], 5);  // 100 * 5 / 100 = 5, plus remainder 0
+
+    // Conservation: sum equals input total
+    assert_eq!(out.iter().sum::<i128>(), 100);
+}
+
+/// Distributes an indivisible amount where rounding creates a remainder.
+#[test]
+fn distributes_amount_with_non_zero_remainder_to_last_bucket() {
+    let mut out = [0i128; 3];
+    // 10 * 3333 / 10000 = 3.333 → floor = 3 (per bucket)
+    // Allocated: 3 + 3 = 6, remainder: 10 - 6 = 4 goes to last bucket
+    distribute_pro_rata(10, &[3333, 3333, 3334], 10_000, &mut out);
+
+    assert_eq!(out[0], 3);  // floor(10 * 3333 / 10000) = 3
+    assert_eq!(out[1], 3);  // floor(10 * 3333 / 10000) = 3
+    assert_eq!(out[2], 4);  // 10 - 3 - 3 = 4 (includes remainder)
+
+    // Conservation
+    assert_eq!(out.iter().sum::<i128>(), 10);
+}
+
+/// Last bucket receives extra units when total does not divide evenly.
+#[test]
+fn last_bucket_receives_rounding_remainder() {
+    let mut out = [0i128; 4];
+    // 1_000_007 * 2500 / 10000 = 250001.75 → floor = 250001
+    // Four buckets, each gets floor share, last gets remainder
+    distribute_pro_rata(1_000_007, &[2500, 2500, 2500, 2500], 10_000, &mut out);
+
+    // First three buckets
+    assert_eq!(out[0], 250001);
+    assert_eq!(out[1], 250001);
+    assert_eq!(out[2], 250001);
+
+    // Last bucket gets remainder: 1_000_007 - 3*250001 = 1_000_007 - 750_003 = 250_004
+    assert_eq!(out[3], 250_004);
+
+    // Conservation
+    assert_eq!(out.iter().sum::<i128>(), 1_000_007);
+}
+
+/// Distributes a perfectly divisible total with no remainder.
+#[test]
+fn distributes_evenly_divisible_total_exactly() {
+    let mut out = [0i128; 4];
+    distribute_pro_rata(1_000_000, &[5000, 3000, 1500, 500], 10_000, &mut out);
+
+    assert_eq!(out[0], 500_000); // 1M * 5000 / 10000
+    assert_eq!(out[1], 300_000); // 1M * 3000 / 10000
+    assert_eq!(out[2], 150_000); // 1M * 1500 / 10000
+    assert_eq!(out[3], 50_000);  // 1M * 500 / 10000
+
+    // Conservation
+    assert_eq!(out.iter().sum::<i128>(), 1_000_000);
+}
+
+/// Distributes entire amount to a single recipient.
+#[test]
+fn distributes_full_amount_to_single_recipient() {
+    let mut out = [0i128; 1];
+    distribute_pro_rata(999_999, &[100], 100, &mut out);
+
+    assert_eq!(out[0], 999_999);
+
+    // Conservation
+    assert_eq!(out.iter().sum::<i128>(), 999_999);
+}
+
+/// Distributes zero total — all recipients receive zero.
+#[test]
+fn distributes_zero_total_without_panic() {
+    let mut out = [0i128; 4];
+    distribute_pro_rata(0, &[25, 25, 25, 25], 100, &mut out);
+
+    assert_eq!(out[0], 0);
+    assert_eq!(out[1], 0);
+    assert_eq!(out[2], 0);
+    assert_eq!(out[3], 0);
+
+    // Conservation
+    assert_eq!(out.iter().sum::<i128>(), 0);
+}
+
+/// Distributes when one weight is zero — zero-weight recipient receives nothing.
+#[test]
+fn distributes_with_zero_weight_recipient() {
+    let mut out = [0i128; 4];
+    distribute_pro_rata(100, &[50, 30, 20, 0], 100, &mut out);
+
+    assert_eq!(out[0], 50);
+    assert_eq!(out[1], 30);
+    assert_eq!(out[2], 20);
+    assert_eq!(out[3], 0);  // zero weight → receives only remainder (0 in this case)
+
+    // Conservation
+    assert_eq!(out.iter().sum::<i128>(), 100);
+}
+
+/// Distributes when last weight is zero and remainder exists.
+#[test]
+fn zero_weight_last_bucket_receives_remainder() {
+    let mut out = [0i128; 3];
+    // 10 * 4000 / 10000 = 4, twice = 8
+    // Remainder: 10 - 8 = 2 goes to last bucket (even though its weight is 0)
+    distribute_pro_rata(10, &[4000, 4000, 0], 10_000, &mut out);
+
+    assert_eq!(out[0], 4);
+    assert_eq!(out[1], 4);
+    assert_eq!(out[2], 2); // weight is 0, but receives remainder 2
+
+    // Conservation
+    assert_eq!(out.iter().sum::<i128>(), 10);
+}
+
+/// Distributes using basis points (10_000 = 100%).
+#[test]
+fn distributes_using_basis_points_denomination() {
+    let mut out = [0i128; 4];
+    // 5% = 500 bps, 3% = 300 bps, 1.5% = 150 bps, 0.5% = 50 bps
+    distribute_pro_rata(1_000_000, &[500, 300, 150, 50], 10_000, &mut out);
+
+    assert_eq!(out[0], 50_000);  // 5%
+    assert_eq!(out[1], 30_000);  // 3%
+    assert_eq!(out[2], 15_000);  // 1.5%
+    assert_eq!(out[3], 5_000);   // 0.5%
+
+    // Conservation
+    assert_eq!(out.iter().sum::<i128>(), 100_000); // only 10% of total distributed
+}
+
+/// Conservation invariant holds for large total near i128 upper range.
+#[test]
+fn conservation_holds_for_large_total() {
+    let mut out = [0i128; 4];
+    let large_total = i128::MAX / 1_000_000; // Large but won't overflow in multiplication
+
+    distribute_pro_rata(large_total, &[2500, 2500, 2500, 2500], 10_000, &mut out);
+
+    // Conservation
+    assert_eq!(out.iter().sum::<i128>(), large_total);
+
+    // Each bucket gets approximately 1/4
+    let expected_floor = large_total / 4;
+    assert!(out[0] >= expected_floor);
+    assert!(out[1] >= expected_floor);
+    assert!(out[2] >= expected_floor);
+    // Last bucket absorbs remainder
+    assert!(out[3] >= expected_floor);
+}
+
+proptest! {
+    /// Property test: conservation and smallest-benefits-from-rounding invariants.
+    ///
+    /// For any valid input (non-negative total, positive total_weight, non-empty weights),
+    /// the following properties must hold:
+    /// 1. **Conservation**: sum(out) == total
+    /// 2. **Non-negative outputs**: every output >= 0
+    /// 3. **Last bucket absorbs remainder**: out[last] >= floor(total * weight[last] / total_weight)
+    /// 4. **Bounded outputs**: each out[i] <= total
+    #[test]
+    fn proptest_distribute_pro_rata_conservation_and_rounding(
+        total in 0i128..=i128::MAX / 1_000_000, // Avoid overflow in intermediate products
+        weights in proptest::collection::vec(1u32..=1000u32, 1..=10),
+    ) {
+        let total_weight: u32 = weights.iter().map(|&w| w as u32).sum();
+        if total_weight == 0 {
+            return Ok(()); // Skip invalid input
+        }
+
+        let mut out = std::vec![0i128; weights.len()];
+        distribute_pro_rata(total, &weights, total_weight, &mut out);
+
+        // Property 1: Conservation — sum equals input
+        prop_assert_eq!(out.iter().sum::<i128>(), total);
+
+        // Property 2: Non-negative outputs
+        for &amount in &out {
+            prop_assert!(amount >= 0, "output must be non-negative");
+        }
+
+        // Property 3: Last bucket receives at least its floor share (absorbs remainder)
+        let last_idx = weights.len() - 1;
+        let last_floor = (total as i128)
+            .saturating_mul(weights[last_idx] as i128)
+            .saturating_div(total_weight as i128);
+        prop_assert!(
+            out[last_idx] >= last_floor,
+            "last bucket must receive at least floor share (absorbs rounding remainder)"
+        );
+
+        // Property 4: No output exceeds total
+        for &amount in &out {
+            prop_assert!(amount <= total, "no bucket can exceed total");
+        }
+    }
+}
+
+// ─── require_supported_rate_unit tests (#1188) ───────────────────────────────
+
+#[test]
+fn test_require_supported_rate_unit_accepts_basis_points() {
+    assert_eq!(
+        require_supported_rate_unit(1),
+        Ok(RateUnit::BasisPoints)
+    );
+    assert_eq!(
+        Rate::try_from_input(500, 1),
+        Ok(Rate::from_bps(500))
+    );
+}
+
+#[test]
+fn test_require_supported_rate_unit_rejects_unsupported_unit() {
+    assert_eq!(
+        require_supported_rate_unit(2),
+        Err(RateUnitError::UnsupportedRateUnit)
+    );
+    assert_eq!(
+        Rate::try_from_input(500, 2),
+        Err(RateUnitError::UnsupportedRateUnit)
+    );
+}
+
+// ─── require_valid_symbol_length tests (#1078) ───────────────────────────────
+
+/// A 9-char short symbol (at the boundary) passes validation.
+#[test]
+fn test_require_valid_symbol_length_9_chars_passes() {
+    let env = Env::default();
+    let sym = Symbol::new(&env, "boundary9"); // exactly 9 chars
+    assert_eq!(require_valid_symbol_length(&env, &sym), Ok(()));
+}
+
+/// A 1-char symbol passes validation.
+#[test]
+fn test_require_valid_symbol_length_single_char_passes() {
+    let env = Env::default();
+    let sym = Symbol::new(&env, "a");
+    assert_eq!(require_valid_symbol_length(&env, &sym), Ok(()));
+}
+
+/// An empty symbol (0 bytes) passes validation (it's under 9).
+#[test]
+fn test_require_valid_symbol_length_empty_passes() {
+    let env = Env::default();
+    let sym = Symbol::new(&env, "");
+    assert_eq!(require_valid_symbol_length(&env, &sym), Ok(()));
+}
+
+/// A 10-char symbol (one past the short-symbol boundary) is rejected.
+#[test]
+fn test_require_valid_symbol_length_10_chars_rejected() {
+    let env = Env::default();
+    let sym = Symbol::new(&env, "boundary10"); // exactly 10 chars
+    assert_eq!(
+        require_valid_symbol_length(&env, &sym),
+        Err(SymbolError::SymbolTooLong)
+    );
+}
+
+/// A 32-char symbol (at the SDK's hard limit) is rejected because it's
+/// still past the 9-char short-symbol boundary.
+#[test]
+fn test_require_valid_symbol_length_32_chars_rejected() {
+    let env = Env::default();
+    let sym = Symbol::new(&env, "abcdefghijklmnopqrstuvwxyzabcd"); // 32 chars
+    assert_eq!(
+        require_valid_symbol_length(&env, &sym),
+        Err(SymbolError::SymbolTooLong)
+    );
+}
+
+/// A short 4-char symbol passes validation.
+#[test]
+fn test_require_valid_symbol_length_short_passes() {
+    let env = Env::default();
+    let sym = Symbol::new(&env, "test"); // 4 chars, well within limit
+    assert_eq!(require_valid_symbol_length(&env, &sym), Ok(()));
+}
+
+/// A typical storage-key style symbol (≤ 9 chars) passes.
+#[test]
+fn test_require_valid_symbol_length_storage_key_passes() {
+    let env = Env::default();
+    let sym = Symbol::new(&env, "ADMIN"); // 5 chars
+    assert_eq!(require_valid_symbol_length(&env, &sym), Ok(()));
+}
+
+/// The error discriminant is stable (pinned to 1) via `#[contracterror]`.
+/// This test checks that the enum round-trips through Val encoding.
+#[test]
+fn test_symbol_error_encoding_stability() {
+    use soroban_sdk::TryFromVal;
+    let env = Env::default();
+    let val: soroban_sdk::Val = soroban_sdk::IntoVal::into_val(&SymbolError::SymbolTooLong, &env);
+    let err: SymbolError =
+        <SymbolError as TryFromVal<Env, soroban_sdk::Val>>::try_from_val(&env, &val)
+            .expect("SymbolError must round-trip through Val");
+    assert_eq!(err, SymbolError::SymbolTooLong);
+}
+
+// ============================================================================
+// canonicalize_tags_checked — untrusted caller tests (#1034)
+// ============================================================================
+
+#[test]
+fn test_canonicalize_tags_checked_returns_ok_for_valid_tags() {
+    let env = Env::default();
+    let tags = soroban_sdk::vec![
+        &env,
+        soroban_sdk::String::from_str(&env, "payments"),
+        soroban_sdk::String::from_str(&env, "SAVINGS"),
+    ];
+    let result = canonicalize_tags_checked(&env, &tags);
+    assert!(result.is_ok());
+    let out = result.unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(
+        out.get(1).unwrap(),
+        soroban_sdk::String::from_str(&env, "savings")
+    );
+}
+
+#[test]
+fn test_canonicalize_tags_checked_returns_err_for_empty_batch() {
+    let env = Env::default();
+    let tags: soroban_sdk::Vec<soroban_sdk::String> = soroban_sdk::Vec::new(&env);
+    let result = canonicalize_tags_checked(&env, &tags);
+    assert_eq!(result, Err(crate::TagError::Empty));
+}
+
+#[test]
+fn test_canonicalize_tags_checked_returns_err_for_empty_tag_string() {
+    let env = Env::default();
+    let tags = soroban_sdk::vec![&env, soroban_sdk::String::from_str(&env, "")];
+    let result = canonicalize_tags_checked(&env, &tags);
+    assert_eq!(result, Err(crate::TagError::Empty));
+}
+
+#[test]
+fn test_canonicalize_tags_checked_returns_err_for_tag_too_long() {
+    let env = Env::default();
+    let long_tag = "a".repeat((crate::TAG_MAX_LEN + 1) as usize);
+    let tags = soroban_sdk::vec![&env, soroban_sdk::String::from_str(&env, &long_tag)];
+    let result = canonicalize_tags_checked(&env, &tags);
+    assert_eq!(result, Err(crate::TagError::TooLong));
+}
+
+#[test]
+fn test_canonicalize_tags_checked_returns_invalid_char_for_untrusted_input() {
+    let env = Env::default();
+    // Space is not in the allowed charset — should return InvalidChar, not panic.
+    let tags = soroban_sdk::vec![&env, soroban_sdk::String::from_str(&env, "bad tag")];
+    let result = canonicalize_tags_checked(&env, &tags);
+    assert!(matches!(result, Err(crate::TagError::InvalidChar { .. })));
+}
+
+#[test]
+fn test_canonicalize_tags_checked_does_not_panic_on_injected_special_chars() {
+    let env = Env::default();
+    // Callers from untrusted sources (e.g., indexer input) must get Result not panic.
+    let tags = soroban_sdk::vec![&env, soroban_sdk::String::from_str(&env, "=formula")];
+    let result = canonicalize_tags_checked(&env, &tags);
+    // '=' is not in [a-z0-9-_], so it must return InvalidChar.
+    assert!(matches!(
+        result,
+        Err(crate::TagError::InvalidChar { position: 0 })
+    ));
+}
+
+// ============================================================================
+// require_active_pause_channel tests
+// ============================================================================
+
+#[test]
+fn test_require_active_pause_channel_uninitialized() {
+    let env = Env::default();
+    // Map doesn't exist yet, should not panic
+    crate::require_active_pause_channel(&env, soroban_sdk::Symbol::short("PAYMENTS"));
+}
+
+#[test]
+fn test_require_active_pause_channel_active() {
+    let env = Env::default();
+    let mut map = soroban_sdk::Map::<soroban_sdk::Symbol, bool>::new(&env);
+    map.set(soroban_sdk::Symbol::short("PAYMENTS"), false);
+    env.storage().instance().set(
+        &soroban_sdk::Symbol::new(&env, crate::STORAGE_PAUSE_CHANNELS),
+        &map,
+    );
+
+    // Channel is active (false), should not panic
+    crate::require_active_pause_channel(&env, soroban_sdk::Symbol::short("PAYMENTS"));
+}
+
+#[test]
+#[should_panic(expected = "Pause channel is inactive")]
+fn test_require_active_pause_channel_paused() {
+    let env = Env::default();
+    let mut map = soroban_sdk::Map::<soroban_sdk::Symbol, bool>::new(&env);
+    map.set(soroban_sdk::Symbol::short("PAYMENTS"), true);
+    env.storage().instance().set(
+        &soroban_sdk::Symbol::new(&env, crate::STORAGE_PAUSE_CHANNELS),
+        &map,
+    );
+
+    // Channel is paused (true), should panic
+    crate::require_active_pause_channel(&env, soroban_sdk::Symbol::short("PAYMENTS"));
+}
+
+// ============================================================================
+// Type-safe Percent -> Basis Points conversion tests
+// ============================================================================
+
+#[test]
+fn test_bps_per_percent_constants() {
+    assert_eq!(BPS_PER_PERCENT, 100);
+    assert_eq!(BASIS_POINTS_PER_PERCENT, 100);
+    assert_eq!(BASIS_POINTS, 10_000);
+    assert_eq!(BASIS_POINTS / BPS_PER_PERCENT, 100);
+}
+
+#[test]
+fn test_rate_from_percent() {
+    assert_eq!(Rate::from_percent(0), Ok(Rate::from_bps(0)));
+    assert_eq!(Rate::from_percent(1), Ok(Rate::from_bps(100)));
+    assert_eq!(Rate::from_percent(5), Ok(Rate::from_bps(500)));
+    assert_eq!(Rate::from_percent(50), Ok(Rate::from_bps(5_000)));
+    assert_eq!(Rate::from_percent(100), Ok(Rate::from_bps(10_000)));
+    assert_eq!(Rate::from_percent(500), Ok(Rate::from_bps(50_000)));
+    assert_eq!(
+        Rate::from_percent(u32::MAX / 100),
+        Ok(Rate::from_bps((u32::MAX / 100) * 100))
+    );
+    assert_eq!(
+        Rate::from_percent((u32::MAX / 100) + 1),
+        Err(RateError::Overflow)
+    );
+    assert_eq!(Rate::from_percent(u32::MAX), Err(RateError::Overflow));
+}
+
+#[test]
+fn test_rate_to_percent_and_fractional() {
+    let rate_0 = Rate::from_bps(0);
+    assert_eq!(rate_0.to_percent(), 0);
+    assert!(!rate_0.has_fractional_percent());
+
+    let rate_500 = Rate::from_bps(500); // 5%
+    assert_eq!(rate_500.to_percent(), 5);
+    assert!(!rate_500.has_fractional_percent());
+
+    let rate_550 = Rate::from_bps(550); // 5.5%
+    assert_eq!(rate_550.to_percent(), 5); // truncated
+    assert!(rate_550.has_fractional_percent());
+
+    let rate_1 = Rate::from_bps(1); // 0.01%
+    assert_eq!(rate_1.to_percent(), 0);
+    assert!(rate_1.has_fractional_percent());
+}
+
+#[test]
+fn test_percent_type_conversions() {
+    let p0 = Percent::ZERO;
+    assert_eq!(p0.to_percentage(), 0);
+    assert_eq!(p0.to_rate(), Ok(Rate::ZERO));
+    assert_eq!(p0.to_bps(), Ok(0));
+
+    let p5 = Percent::from_percentage(5);
+    assert_eq!(p5.to_percentage(), 5);
+    assert_eq!(p5.to_rate(), Ok(Rate::from_bps(500)));
+    assert_eq!(p5.to_bps(), Ok(500));
+
+    let p100 = Percent::HUNDRED;
+    assert_eq!(p100.to_percentage(), 100);
+    assert_eq!(p100.to_rate(), Ok(Rate::from_bps(10_000)));
+    assert_eq!(p100.to_bps(), Ok(10_000));
+
+    let rate_from_p: Result<Rate, RateError> = p5.try_into();
+    assert_eq!(rate_from_p, Ok(Rate::from_bps(500)));
+
+    let rate_from_type = Rate::from_percent_type(p5);
+    assert_eq!(rate_from_type, Ok(Rate::from_bps(500)));
+
+    let p_overflow = Percent::from_percentage(u32::MAX);
+    assert_eq!(p_overflow.to_rate(), Err(RateError::Overflow));
+    assert_eq!(p_overflow.to_bps(), Err(RateError::Overflow));
+}
+
+proptest! {
+    #[test]
+    fn proptest_percent_rate_roundtrip(pct in 0u32..=(u32::MAX / 100)) {
+        let rate = Rate::from_percent(pct).unwrap();
+        prop_assert_eq!(rate.to_percent(), pct);
+        prop_assert_eq!(rate.to_bps(), pct * 100);
+        prop_assert!(!rate.has_fractional_percent());
+
+        let p = Percent::from_percentage(pct);
+        prop_assert_eq!(p.to_rate(), Ok(rate));
+        prop_assert_eq!(p.to_bps(), Ok(pct * 100));
+    }
+}
