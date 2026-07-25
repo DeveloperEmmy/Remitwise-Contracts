@@ -58,7 +58,7 @@ fn transfer_admin_rejects_self_address() {
     let admin = Address::generate(&env);
     client.initialize(&admin);
     assert_eq!(
-        client.try_transfer_admin(&contract_id),
+        client.try_transfer_admin(&contract_id, &0),
         Err(Ok(Error::InvalidAdmin))
     );
 }
@@ -71,7 +71,7 @@ fn transfer_admin_rejects_same_admin() {
     let admin = Address::generate(&env);
     client.initialize(&admin);
     assert_eq!(
-        client.try_transfer_admin(&admin),
+        client.try_transfer_admin(&admin, &0),
         Err(Ok(Error::InvalidAdmin))
     );
 }
@@ -84,7 +84,7 @@ fn transfer_admin_succeeds_with_different_address() {
     let admin = Address::generate(&env);
     let new_admin = Address::generate(&env);
     client.initialize(&admin);
-    assert_eq!(client.try_transfer_admin(&new_admin), Ok(Ok(())));
+    assert_eq!(client.try_transfer_admin(&new_admin, &0), Ok(Ok(())));
 }
 
 #[test]
