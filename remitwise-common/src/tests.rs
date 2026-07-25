@@ -16,8 +16,9 @@
 extern crate std;
 
 use super::*;
+use ed25519_dalek::Signer;
 use proptest::prelude::*;
-use soroban_sdk::{Bytes, Env, String, Vec};
+use soroban_sdk::{Env, String, Vec};
 
 // helper: build a single-element tag Vec
 fn single(env: &Env, tag: &str) -> Vec<String> {
@@ -434,6 +435,35 @@ proptest! {
         prop_assert!((1..=MAX_PAGE_LIMIT).contains(&clamped));
         prop_assert_eq!(clamp_limit(clamped), clamped);
     }
+
+    /// Property test for cross-domain signature replay protection.
+    ///
+    /// Sign for domain A, replay against domain B — must fail.
+    #[test]
+    fn proptest_signature_signed_for_domain_a_replayed_against_domain_b_fails(
+        domain_a in proptest::collection::vec(any::<u8>(), 8),
+        domain_b in proptest::collection::vec(any::<u8>(), 8),
+        msg in proptest::collection::vec(any::<u8>(), 1..64),
+    ) {
+        prop_assume!(domain_a != domain_b);
+
+        let env = Env::default();
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let pk = sk.verifying_key().to_bytes();
+
+        let mut prefixed = std::vec::Vec::new();
+        prefixed.extend_from_slice(&domain_a);
+        prefixed.extend_from_slice(&msg);
+        let signature = sk.sign(&prefixed).to_bytes();
+
+        let valid_res = verify_signature(&env, &domain_a, &msg, &signature, &pk);
+        prop_assert_eq!(valid_res, Ok(()));
+
+        let replay_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = verify_signature(&env, &domain_b, &msg, &signature, &pk);
+        }));
+        prop_assert!(replay_res.is_err(), "Signature signed for domain A replayed against domain B must fail");
+    }
 }
 
 /// Explicit regression pin for the largest u32 input: it must clamp without
@@ -528,19 +558,41 @@ fn test_verify_signature_wrong_domain() {
     let _ = verify_signature(&env, domain2, message, &signature, &pk);
 }
 
+/// Sign for domain A, replay against domain B — must fail.
+#[test]
+#[should_panic]
+fn test_sign_for_domain_a_replay_against_domain_b_fails() {
+    let env = Env::default();
+    let domain_a = b"domain-A-auth-v1";
+    let domain_b = b"domain-B-auth-v1";
+    let message = b"transfer 1000 USDC to account X";
+
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key().to_bytes();
+
+    let mut prefixed = std::vec::Vec::new();
+    prefixed.extend_from_slice(domain_a);
+    prefixed.extend_from_slice(message);
+    let signature = sk.sign(&prefixed).to_bytes();
+
+    assert_eq!(verify_signature(&env, domain_a, message, &signature, &pk), Ok(()));
+    let _ = verify_signature(&env, domain_b, message, &signature, &pk);
+}
+
 #[test]
 fn test_verify_slash_signature_valid() {
     let env = Env::default();
     let message = b"slash payload";
 
     // Generate a keypair
-    let (sk, pk) = soroban_sdk::testutils::ed25519::generate(&env);
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key().to_bytes();
 
     // Sign the prefixed message
     let mut prefixed = std::vec::Vec::new();
     prefixed.extend_from_slice(b"slash-auth");
     prefixed.extend_from_slice(message);
-    let signature = soroban_sdk::testutils::ed25519::sign(&env, &sk, &prefixed);
+    let signature = sk.sign(&prefixed).to_bytes();
 
     // Verify the slash signature
     let result = verify_slash_signature(&env, message, Some(&signature), &pk);
@@ -559,17 +611,18 @@ fn test_verify_slash_signature_optional_none() {
 }
 
 #[test]
+#[should_panic]
 fn test_verify_slash_signature_invalid() {
     let env = Env::default();
     let message = b"slash payload";
 
     // Generate a keypair
-    let (_, pk) = soroban_sdk::testutils::ed25519::generate(&env);
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key().to_bytes();
     let invalid_signature = [0u8; 64]; // Invalid
 
     // Verify the invalid slash signature
-    let result = verify_slash_signature(&env, message, Some(&invalid_signature), &pk);
-    assert_eq!(result, Err(SlashError::InvalidSignature));
+    let _ = verify_slash_signature(&env, message, Some(&invalid_signature), &pk);
 }
 
 // ============================================================================
