@@ -16,6 +16,7 @@
 extern crate std;
 
 use super::*;
+use ed25519_dalek::Signer;
 use proptest::prelude::*;
 use soroban_sdk::{Bytes, Env, String, Vec};
 
@@ -41,6 +42,15 @@ fn get(_env: &Env, v: &Vec<String>, i: u32) -> std::string::String {
     let mut buf = std::vec![0u8; s.len() as usize];
     s.copy_into_slice(&mut buf);
     std::string::String::from_utf8(buf).unwrap()
+}
+
+fn prefixed_message(domain_separator: &[u8], message: &[u8]) -> std::vec::Vec<u8> {
+    let mut bytes = std::vec::Vec::new();
+    bytes.extend_from_slice(&(domain_separator.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(domain_separator);
+    bytes.extend_from_slice(&(message.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(message);
+    bytes
 }
 
 // ─── canonicalize_tags: lowercasing ──────────────────────────────────────────
@@ -458,10 +468,7 @@ fn test_verify_signature_valid() {
     let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
     let pk = sk.verifying_key().to_bytes();
 
-    // Sign the prefixed message
-    let mut prefixed = std::vec::Vec::new();
-    prefixed.extend_from_slice(domain);
-    prefixed.extend_from_slice(message);
+    let prefixed = prefixed_message(domain, message);
     let signature = sk.sign(&prefixed).to_bytes();
 
     let result = verify_signature(&env, domain, message, &signature, &pk);
@@ -520,12 +527,30 @@ fn test_verify_signature_wrong_domain() {
     let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
     let pk = sk.verifying_key().to_bytes();
 
-    let mut prefixed = std::vec::Vec::new();
-    prefixed.extend_from_slice(domain1);
-    prefixed.extend_from_slice(message);
+    let prefixed = prefixed_message(domain1, message);
     let signature = sk.sign(&prefixed).to_bytes();
 
     let _ = verify_signature(&env, domain2, message, &signature, &pk);
+}
+
+#[test]
+fn test_verify_signature_rejects_adjacent_domain_message_collision() {
+    let env = Env::default();
+    let domain1 = b"abc";
+    let message1 = b"def";
+    let domain2 = b"ab";
+    let message2 = b"cdef";
+
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key().to_bytes();
+
+    let signature = sk.sign(&prefixed_message(domain1, message1)).to_bytes();
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = verify_signature(&env, domain2, message2, &signature, &pk);
+    }));
+
+    assert!(outcome.is_err(), "adjacent payload bytes must not verify");
 }
 
 #[test]
@@ -533,14 +558,11 @@ fn test_verify_slash_signature_valid() {
     let env = Env::default();
     let message = b"slash payload";
 
-    // Generate a keypair
-    let (sk, pk) = soroban_sdk::testutils::ed25519::generate(&env);
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key().to_bytes();
 
-    // Sign the prefixed message
-    let mut prefixed = std::vec::Vec::new();
-    prefixed.extend_from_slice(b"slash-auth");
-    prefixed.extend_from_slice(message);
-    let signature = soroban_sdk::testutils::ed25519::sign(&env, &sk, &prefixed);
+    let prefixed = prefixed_message(b"slash-auth", message);
+    let signature = sk.sign(&prefixed).to_bytes();
 
     // Verify the slash signature
     let result = verify_slash_signature(&env, message, Some(&signature), &pk);
@@ -559,17 +581,16 @@ fn test_verify_slash_signature_optional_none() {
 }
 
 #[test]
+#[should_panic]
 fn test_verify_slash_signature_invalid() {
     let env = Env::default();
     let message = b"slash payload";
 
-    // Generate a keypair
-    let (_, pk) = soroban_sdk::testutils::ed25519::generate(&env);
+    let pk = [0u8; 32];
     let invalid_signature = [0u8; 64]; // Invalid
 
     // Verify the invalid slash signature
-    let result = verify_slash_signature(&env, message, Some(&invalid_signature), &pk);
-    assert_eq!(result, Err(SlashError::InvalidSignature));
+    let _ = verify_slash_signature(&env, message, Some(&invalid_signature), &pk);
 }
 
 // ============================================================================

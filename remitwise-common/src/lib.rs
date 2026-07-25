@@ -1,7 +1,11 @@
 #![no_std]
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-use soroban_sdk::{contracterror, contracttype, symbol_short, Address, Bytes, Env, Map, Symbol};
+use soroban_sdk::{
+    contracterror, contracttype, symbol_short, Address, Bytes, Env, IntoVal, Map, Symbol,
+};
+use soroban_sdk::testutils::Events;
+use soroban_sdk::xdr::ToXdr;
 
 /// Financial categories for remittance allocation
 #[contracttype]
@@ -58,6 +62,7 @@ pub enum EventCategory {
     Alert = 2,
     System = 3,
     Access = 4,
+    Compliance = 5,
 }
 
 /// Priority levels for events emitted by contracts.
@@ -70,6 +75,7 @@ pub enum EventPriority {
     Low = 0,
     Medium = 1,
     High = 2,
+    Critical = 3,
 }
 
 impl EventCategory {
@@ -338,6 +344,12 @@ pub enum SignatureError {
 
 /// Verify an Ed25519 signature with domain separation.
 ///
+/// The payload is encoded as a length-delimited byte stream so adjacent or
+/// overlapping separators/messages cannot collide. For example, the pair
+/// `(domain="ab", message="cdef")` and `(domain="abc", message="def")`
+/// produce different payloads even though their plain concatenation would be
+/// identical.
+///
 /// # Arguments
 /// * `env` - Soroban environment
 /// * `domain_separator` - Domain separator to prevent cross-domain replay attacks
@@ -362,7 +374,13 @@ pub fn verify_signature(
         .try_into()
         .map_err(|_| SignatureError::InvalidSignatureLength)?;
 
-    let mut msg_bytes = Bytes::from_slice(env, domain_separator);
+    let mut msg_bytes = Bytes::new(env);
+    let domain_len = (domain_separator.len() as u64).to_le_bytes();
+    let message_len = (message.len() as u64).to_le_bytes();
+
+    msg_bytes.extend_from_slice(&domain_len);
+    msg_bytes.extend_from_slice(domain_separator);
+    msg_bytes.extend_from_slice(&message_len);
     msg_bytes.extend_from_slice(message);
 
     let sig_bytes = soroban_sdk::BytesN::from_array(env, &sig_arr);
@@ -638,24 +656,29 @@ impl RemitwiseEvents {
             4,
             "expected a 4-element Remitwise event topic tuple"
         );
+        let expected_marker: soroban_sdk::Val = symbol_short!("Remitwise").into_val(env);
+        let expected_category_val: soroban_sdk::Val = expected_category.to_u32().into_val(env);
+        let expected_priority_val: soroban_sdk::Val = expected_priority.to_u32().into_val(env);
+        let expected_action_val: soroban_sdk::Val = expected_action.into_val(env);
+
         assert_eq!(
-            topics.get(0).unwrap(),
-            symbol_short!("Remitwise").into_val(env),
+            topics.get(0).unwrap().get_payload(),
+            expected_marker.get_payload(),
             "first topic must be the Remitwise marker"
         );
         assert_eq!(
-            topics.get(1).unwrap(),
-            expected_category.to_u32().into_val(env),
+            topics.get(1).unwrap().get_payload(),
+            expected_category_val.get_payload(),
             "event category mismatch"
         );
         assert_eq!(
-            topics.get(2).unwrap(),
-            expected_priority.to_u32().into_val(env),
+            topics.get(2).unwrap().get_payload(),
+            expected_priority_val.get_payload(),
             "event priority mismatch"
         );
         assert_eq!(
-            topics.get(3).unwrap(),
-            expected_action.into_val(env),
+            topics.get(3).unwrap().get_payload(),
+            expected_action_val.get_payload(),
             "event action mismatch"
         );
 
@@ -675,19 +698,31 @@ impl RemitwiseEvents {
 #[cfg(test)]
 mod assert_event_tests {
     use super::{EventCategory, EventPriority, RemitwiseEvents};
+    use soroban_sdk::{contract, contractimpl, Env};
+
+    #[contract]
+    struct AssertEventHarness;
+
+    #[contractimpl]
+    impl AssertEventHarness {
+        pub fn noop(_env: Env) {}
+    }
 
     #[test]
     fn assert_last_event_matches_emitted_topic_and_data() {
         let env = soroban_sdk::Env::default();
         let action = soroban_sdk::Symbol::new(&env, "test_act");
+        let contract_id = env.register_contract(None, AssertEventHarness);
 
-        RemitwiseEvents::emit(
-            &env,
-            EventCategory::Access,
-            EventPriority::High,
-            action,
-            (1u32, 2u32),
-        );
+        env.as_contract(&contract_id, || {
+            RemitwiseEvents::emit(
+                &env,
+                EventCategory::Access,
+                EventPriority::High,
+                action.clone(),
+                (1u32, 2u32),
+            );
+        });
 
         RemitwiseEvents::assert_last_event::<(u32, u32), _>(
             &env,
@@ -702,13 +737,18 @@ mod assert_event_tests {
     #[should_panic(expected = "event action mismatch")]
     fn assert_last_event_panics_on_action_mismatch() {
         let env = soroban_sdk::Env::default();
-        RemitwiseEvents::emit(
-            &env,
-            EventCategory::Access,
-            EventPriority::High,
-            soroban_sdk::Symbol::new(&env, "one"),
-            1u32,
-        );
+        let action = soroban_sdk::Symbol::new(&env, "one");
+        let contract_id = env.register_contract(None, AssertEventHarness);
+
+        env.as_contract(&contract_id, || {
+            RemitwiseEvents::emit(
+                &env,
+                EventCategory::Access,
+                EventPriority::High,
+                action,
+                1u32,
+            );
+        });
         RemitwiseEvents::assert_last_event::<u32, _>(
             &env,
             EventCategory::Access,
