@@ -152,6 +152,48 @@ pub fn validate_period(start: u64, end: u64) -> Result<(), TimeError> {
 }
 
 // ---------------------------------------------------------------------------
+// Non-zero u128 helper
+// ---------------------------------------------------------------------------
+
+/// Error returned when a non-zero u128 value was expected but zero was provided.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ZeroNotAllowed;
+
+/// A u128 value that is guaranteed to be non-zero.
+///
+/// This type wraps a `u128` and enforces at construction that the value is not
+/// zero. Once constructed, callers can safely assume the value is in `1..=u128::MAX`.
+///
+/// # Examples
+///
+/// ```ignore
+/// use remitwise_common::{NonZeroU128, ZeroNotAllowed};
+///
+/// let nz = NonZeroU128::new(42).unwrap();
+/// assert_eq!(nz.get(), 42);
+///
+/// assert_eq!(NonZeroU128::new(0), Err(ZeroNotAllowed));
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct NonZeroU128(u128);
+
+impl NonZeroU128 {
+    /// Creates a new `NonZeroU128` if `value` is non-zero.
+    pub fn new(value: u128) -> Result<Self, ZeroNotAllowed> {
+        if value == 0 {
+            Err(ZeroNotAllowed)
+        } else {
+            Ok(NonZeroU128(value))
+        }
+    }
+
+    /// Returns the contained u128 value.
+    pub fn get(&self) -> u128 {
+        self.0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tag canonicalization
 // ---------------------------------------------------------------------------
 
@@ -347,6 +389,9 @@ mod tests;
 
 #[cfg(test)]
 mod emit_tests;
+
+#[cfg(test)]
+mod non_zero_u128_tests;
 
 impl RemitwiseEvents {
     /// Emits a single event with the given category, priority, and action.
