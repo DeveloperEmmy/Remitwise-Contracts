@@ -342,6 +342,7 @@ To run an example, use `cargo run --example <example_name>`:
 - [Event Indexer](indexer/README.md) - Off-chain event indexing and querying
 - [Audit Trail](docs/AUDIT_TRAIL.md) - How to reconstruct historical state from events alone
 - [Settler Whitelist](docs/SETTLER_WHITELIST.md) - Operator guide: how settlers are added, rotated, and revoked
+- [Operator Management](docs/OPERATORS.md) - Guide on how operators are added, rotated, and revoked
 - [Killswitch Trust Model](docs/killswitch-trust-model.md) - Who can trigger, who can clear, what state is preserved in the emergency killswitch
 - [Tagging Feature](TAGGING_FEATURE.md) - Tag-based organization system
 - [Threat Model](THREAT_MODEL.md) - Security analysis and mitigations
