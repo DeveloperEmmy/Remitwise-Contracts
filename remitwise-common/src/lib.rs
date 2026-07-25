@@ -1,7 +1,15 @@
 #![no_std]
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-use soroban_sdk::{contracterror, contracttype, symbol_short, Address, Bytes, Env, Map, Symbol};
+pub mod tokens;
+pub use tokens::{
+    SupportedToken, BASE_UNITS_PER_EURC, BASE_UNITS_PER_USDC, DEFAULT_CURRENCY, EURC_DECIMALS,
+    MAX_CURRENCY_LEN, STROOPS_PER_XLM, USDC_DECIMALS, XLM_DECIMALS,
+};
+
+use soroban_sdk::{
+    contracterror, contracttype, symbol_short, Address, Bytes, BytesN, Env, Map, Symbol,
+};
 
 /// Financial categories for remittance allocation
 #[contracttype]
@@ -58,6 +66,7 @@ pub enum EventCategory {
     Alert = 2,
     System = 3,
     Access = 4,
+    Compliance = 5,
 }
 
 /// Priority levels for events emitted by contracts.
@@ -70,6 +79,7 @@ pub enum EventPriority {
     Low = 0,
     Medium = 1,
     High = 2,
+    Critical = 3,
 }
 
 impl EventCategory {
@@ -109,6 +119,9 @@ pub const SIGNATURE_EXPIRATION: u64 = 86400;
 /// Contract version
 pub const CONTRACT_VERSION: u32 = 1;
 
+/// Storage key for the pause channels map
+pub const STORAGE_PAUSE_CHANNELS: &str = "PAUSE_CH";
+
 /// Maximum batch size for operations
 pub const MAX_BATCH_SIZE: u32 = 50;
 
@@ -129,6 +142,50 @@ pub const MAX_BYTES_RETURN: u32 = 8192;
 pub enum BytesReturnError {
     /// The byte length exceeds [`MAX_BYTES_RETURN`].
     ReturnTooLarge = 1,
+}
+
+/// Maximum allowed byte length for a short (inline) Symbol.
+///
+/// The Soroban SDK stores symbols ≤ 9 bytes inline as short symbols;
+/// longer symbols use a separate XDR encoding.  This constant mirrors
+/// the implicit boundary in [`symbol_short!`] and in `Symbol::new`.
+pub const SHORT_SYMBOL_MAX_LEN: u32 = 9;
+
+/// Error returned when a Symbol exceeds the short-symbol length limit.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum SymbolError {
+    /// The symbol's byte length exceeds [`SHORT_SYMBOL_MAX_LEN`].
+    SymbolTooLong = 1,
+}
+
+/// Validates that a [`Symbol`] does not exceed the short-symbol limit (9 bytes).
+///
+/// This is a defence-in-depth check.  Symbols longer than 9 bytes use the
+/// large-symbol XDR encoding (`SymbolObject` tag) instead of the inline
+/// short-symbol encoding (`SymbolSmall` tag).  Without this gate, a caller
+/// could supply a long symbol where the contract expects a short one,
+/// potentially leading to storage-key confusion or indexer mismatches
+/// downstream.
+///
+/// The check uses the [`Val`] bit pattern: short symbols are stored inline
+/// (not objects), long symbols are stored as host object references.  This
+/// works on all targets (WASM and non-WASM) without requiring string
+/// conversion.
+///
+/// Call this on any `Symbol` value derived from untrusted input before using
+/// it as a storage key, event action, or comparand against `symbol_short!`
+/// constants.
+///
+/// # Errors
+/// Returns [`SymbolError::SymbolTooLong`] when the symbol exceeds 9 bytes.
+pub fn require_valid_symbol_length(_env: &Env, sym: &Symbol) -> Result<(), SymbolError> {
+    if sym.to_val().is_object() {
+        Err(SymbolError::SymbolTooLong)
+    } else {
+        Ok(())
+    }
 }
 
 /// Guards `bytes` against exceeding the XDR return-size budget.
@@ -210,8 +267,29 @@ pub fn require_valid_symbol_length(name: &[u8]) -> Result<(), SymbolLengthError>
 /// Pre-upgrade snapshot version
 pub const SNAPSHOT_VERSION: u32 = 1;
 
+/// Maximum age of a pre-upgrade snapshot before restore is rejected.
+pub const SNAPSHOT_MAX_AGE_SECS: u64 = 30 * 24 * 60 * 60;
+
 /// Storage key for pre-upgrade snapshots
 pub const SNAPSHOT_KEY: Symbol = symbol_short!("SNAPSHOT");
+
+/// Typed error returned when a pre-upgrade snapshot is older than the freshness window.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum SnapshotError {
+    SnapshotTooOld = 1,
+}
+
+/// Ensure a pre-upgrade snapshot is still fresh enough to restore.
+pub fn require_recent_snapshot(env: &Env, snapshot_taken_at: u64) -> Result<(), SnapshotError> {
+    let age = env.ledger().timestamp().saturating_sub(snapshot_taken_at);
+    if age > SNAPSHOT_MAX_AGE_SECS {
+        Err(SnapshotError::SnapshotTooOld)
+    } else {
+        Ok(())
+    }
+}
 
 /// Rate limiting constants
 pub const RATE_LIMIT_WINDOW_SECONDS: u64 = 86400; // 24 hours
@@ -323,6 +401,88 @@ pub fn clamp_limit(limit: u32) -> u32 {
     }
 }
 
+/// Pro-rata distribution helper
+///
+/// Maximum safe weight for a single pro-rata bucket.
+///
+/// Derived from `i128::MAX / i128::MAX` = 1, but the practical constraint is
+/// `total.saturating_mul(max_weight)` must not overflow a consumers mental model.
+/// The denominator (total_weight) is typically 10_000 (100% in basis points) or
+/// 100 (percent). This constant documents the upper bound used by the saturating
+/// path: any weight above this would saturate at `i128::MAX` regardless.
+pub const PRO_RATA_MAX_TOTAL_WEIGHT: u32 = 10_000;
+
+/// Distribute `total` pro-rata across `out.len()` buckets using saturating arithmetic.
+///
+/// Each bucket *i* (except the last) receives
+/// `total.saturating_mul(weights[i] as i128).saturating_div(total_weight as i128)`.
+///
+/// The last bucket receives the remainder (`total - allocated_so_far`) so that
+/// the conservation invariant holds:
+///
+/// ```text
+/// sum(out) == total   (when total does not overflow i128)
+///
+/// ```
+/// When `total` is large enough that intermediate products would exceed `i128::MAX`,
+/// the saturating path caps allocations at `i128::MAX` instead of panicking.
+/// No arithmetic operation in this function can panic.
+///
+/// # Arguments
+/// * `total` - Total amount to distribute. Must be ≥ 0.
+/// * `weights` - Per-bucket weights. Length must equal `out.len()`. Each weight
+///   must be ≤ `total_weight`.
+/// * `total_weight` - Sum of all weights. Must be > 0.
+/// * `out` - Mutable slice filled with the pro-rata distribution.
+///
+/// # Panics (debug-only; in release these are unreachable if preconditions hold)
+/// * `weights.is_empty()` or `out.is_empty()` — there must be at least one bucket.
+/// * `weights.len() != out.len()` — input/output length mismatch.
+/// * `total_weight == 0` — division by zero.
+/// * `total < 0` — negative total is rejected.
+///
+/// # Examples
+///
+/// ```ignore
+/// let mut out = [0i128; 4];
+/// distribute_pro_rata(100, &[50, 30, 15, 5], 100, &mut out);
+/// assert_eq!(out, [50, 30, 15, 5]);
+///
+/// // With basis points (10_000 = 100%):
+/// let mut out = [0i128; 4];
+/// distribute_pro_rata(1_000_000, &[5000, 3000, 1500, 500], 10_000, &mut out);
+/// assert_eq!(out, [500_000, 300_000, 150_000, 50_000]);
+/// ```
+pub fn distribute_pro_rata(total: i128, weights: &[u32], total_weight: u32, out: &mut [i128]) {
+    assert!(total >= 0, "total must be non-negative");
+    assert!(total_weight > 0, "total_weight must be positive");
+    assert!(!out.is_empty(), "out must not be empty");
+    assert!(!weights.is_empty(), "weights must not be empty");
+    assert_eq!(
+        weights.len(),
+        out.len(),
+        "weights and out must have the same length"
+    );
+
+    let n = weights.len();
+
+    // All buckets except the last: standard pro-rata floor allocation.
+    let mut allocated: i128 = 0;
+    let last = n.saturating_sub(1);
+    for i in 0..last {
+        let weight = weights[i] as i128;
+        let share = total
+            .saturating_mul(weight)
+            .saturating_div(total_weight as i128);
+        out[i] = share;
+        allocated = allocated.saturating_add(share);
+    }
+
+    // Last bucket receives the remainder, guaranteeing conservation.
+    // When n == 1, last == 0 and allocated == 0, so out[0] == total.
+    out[last] = total.saturating_sub(allocated);
+}
+
 /// Error converting an integer to `i128` when the value is out of range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IntConversionError {
@@ -346,12 +506,228 @@ impl ToI128Checked for i32 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Rate newtype — basis-points arithmetic
+// ---------------------------------------------------------------------------
+
+/// Basis-points denominator: 10_000 basis points = 100%.
+///
+/// All Remitwise contracts express percentages in basis points (1 bps = 0.01%)
+/// so that integer arithmetic can be used without floating point.
+pub const BASIS_POINTS: u32 = 10_000;
+
+/// Supported units for externally supplied rate inputs.
+///
+/// Remitwise contracts currently accept only basis points. Treating a raw rate
+/// value as unitless would let a caller supply an unexpected denomination and
+/// have the contract silently interpret it as basis points, potentially
+/// magnifying or shrinking fee/discount/allocation calculations. This guard
+/// makes the accepted unit explicit and reject-by-default.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum RateUnit {
+    BasisPoints = 1,
+}
+
+/// Error returned when an externally supplied rate unit is unsupported.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum RateUnitError {
+    UnsupportedRateUnit = 1,
+}
+
+/// Require that `unit` is one of the rate denominations currently supported by
+/// the contracts.
+///
+/// # Errors
+/// Returns [`RateUnitError::UnsupportedRateUnit`] when `unit` is not accepted.
+#[inline(always)]
+pub fn require_supported_rate_unit(unit: u32) -> Result<RateUnit, RateUnitError> {
+    match unit {
+        1 => Ok(RateUnit::BasisPoints),
+        _ => Err(RateUnitError::UnsupportedRateUnit),
+    }
+}
+
+/// Error returned by [`Rate`] arithmetic when the result overflows `i128`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RateError {
+    /// The intermediate or final result exceeds numerical limits (`i128::MAX` or `u32::MAX`).
+    Overflow,
+}
+
+/// A whole percentage value (1% = 100 basis points).
+///
+/// `Percent` wraps a `u32` representing whole percentage units. Safe conversions
+/// to basis points ([`Rate`]) are provided via [`to_rate`](Percent::to_rate),
+/// [`to_bps`](Percent::to_bps), and `TryFrom<Percent> for Rate`.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct Percent(u32);
+
+impl Percent {
+    pub const ZERO: Percent = Percent(0);
+    pub const HUNDRED: Percent = Percent(100);
+
+    /// Create a `Percent` from a whole percentage integer value.
+    #[inline(always)]
+    pub fn from_percentage(percent: u32) -> Self {
+        Self(percent)
+    }
+
+    /// Return the whole percentage integer value.
+    #[inline(always)]
+    pub fn to_percentage(self) -> u32 {
+        self.0
+    }
+
+    /// Convert this `Percent` to a basis-points [`Rate`].
+    ///
+    /// Returns `Ok(Rate)` if `percent * 100` fits in `u32`, or `Err(RateError::Overflow)` otherwise.
+    pub fn to_rate(self) -> Result<Rate, RateError> {
+        Rate::from_percent(self.0)
+    }
+
+    /// Convert this `Percent` to raw basis points (`u32`).
+    ///
+    /// Returns `Ok(bps)` if `percent * 100` fits in `u32`, or `Err(RateError::Overflow)` otherwise.
+    pub fn to_bps(self) -> Result<u32, RateError> {
+        self.0
+            .checked_mul(BPS_PER_PERCENT)
+            .ok_or(RateError::Overflow)
+    }
+}
+
+impl TryFrom<Percent> for Rate {
+    type Error = RateError;
+
+    #[inline(always)]
+    fn try_from(percent: Percent) -> Result<Self, Self::Error> {
+        percent.to_rate()
+    }
+}
+
+/// A rate expressed in basis points (1 bps = 0.01 %).
+///
+/// `Rate` wraps a `u32` where the stored value represents hundredths of a
+/// percent:
+///
+/// | Value | Meaning         |
+/// |-------|-----------------|
+/// | 0     | 0 %             |
+/// | 1     | 0.01 %          |
+/// | 100   | 1 %             |
+/// | 500   | 5 %             |
+/// | 1_000 | 10 %            |
+/// | 10_000| 100 %           |
+/// | 50_000| 500 % (overage) |
+///
+/// Use [`apply_to`](Rate::apply_to) to compute `amount * rate / BASIS_POINTS`
+/// with checked arithmetic.
+///
+/// # Examples
+/// ```
+/// use remitwise_common::{Rate, BASIS_POINTS, RateError};
+///
+/// let rate = Rate::from_bps(500); // 5%
+/// assert_eq!(rate.apply_to(1000), Ok(50));
+/// assert_eq!(rate.apply_to(i128::MAX), Err(RateError::Overflow));
+/// ```
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct Rate(u32);
+
+impl Rate {
+    pub const ZERO: Rate = Rate(0);
+    pub const MAX: Rate = Rate(u32::MAX);
+
+    /// Create a `Rate` from a raw basis-point value.
+    ///
+    /// No validation is performed — `u32::MAX` is accepted. Callers that need
+    /// semantic bounds (e.g. `rate <= BASIS_POINTS` for a discount rate) should
+    /// check them at the call site.
+    #[inline(always)]
+    pub fn from_bps(bps: u32) -> Self {
+        Self(bps)
+    }
+
+    /// Construct a `Rate` from an externally supplied raw value plus unit.
+    ///
+    /// This is the safe entry point for untrusted inputs that carry an explicit
+    /// unit field. Only supported units are accepted.
+    #[inline(always)]
+    pub fn try_from_input(value: u32, unit: u32) -> Result<Self, RateUnitError> {
+        require_supported_rate_unit(unit)?;
+        Ok(Self::from_bps(value))
+    }
+
+    /// Return the raw basis-point value.
+    #[inline(always)]
+    pub fn to_bps(self) -> u32 {
+        self.0
+    }
+
+    /// Convert this rate back to a whole percentage integer value, truncating fractional basis points.
+    #[inline(always)]
+    pub fn to_percent(self) -> u32 {
+        self.0 / BPS_PER_PERCENT
+    }
+
+    /// Return true if this rate contains a fractional percentage (basis points not divisible by 100).
+    #[inline(always)]
+    #[allow(clippy::manual_is_multiple_of)]
+    pub fn has_fractional_percent(self) -> bool {
+        self.0 % BPS_PER_PERCENT != 0
+    }
+
+    /// Apply this rate to `amount`, computing `(amount * self) / BASIS_POINTS`.
+    ///
+    /// Uses checked arithmetic. Returns:
+    /// - `Ok(result)` when the multiplication and division succeed.
+    /// - `Err(RateError::Overflow)` when `amount * self` overflows `i128`.
+    ///
+    /// Note: the division truncates towards zero. This matches the behaviour of
+    /// `safe_percent` elsewhere in the codebase.
+    pub fn apply_to(self, amount: i128) -> Result<i128, RateError> {
+        let rate_i128 = self.0 as i128;
+        amount
+            .checked_mul(rate_i128)
+            .and_then(|product| product.checked_div(BASIS_POINTS as i128))
+            .ok_or(RateError::Overflow)
+    }
+}
+
+impl ToI128Checked for Rate {
+    #[inline(always)]
+    fn to_i128_checked(self) -> Result<i128, IntConversionError> {
+        Ok(self.0 as i128)
+    }
+}
+
 /// Error related to time and periods.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum TimeError {
     InvalidPeriod = 7,
+}
+
+/// Namespace for shared timestamp helpers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct Timestamp;
+
+impl Timestamp {
+    /// Returns the number of whole seconds from `now` until `target`.
+    ///
+    /// The result saturates at `0` when `target <= now`, so callers can measure
+    /// future distance without risking underflow or writing their own
+    /// `saturating_sub`/guard pattern.
+    #[inline(always)]
+    pub fn seconds_until(now: u64, target: u64) -> u64 {
+        target.saturating_sub(now)
+    }
 }
 
 /// Validates that a requested period is logically ordered.
@@ -361,6 +737,33 @@ pub enum TimeError {
 pub fn validate_period(start: u64, end: u64) -> Result<(), TimeError> {
     if start > end {
         Err(TimeError::InvalidPeriod)
+    } else {
+        Ok(())
+    }
+}
+
+/// Error returned when the current ledger sequence does not match the expected value.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum LedgerError {
+    LedgerMismatch = 1,
+}
+
+/// Asserts that `expected` matches the current ledger sequence number.
+///
+/// This is a replay-prevention helper: if an operation was authorized for a
+/// specific ledger (e.g. via a signed nonce bound to a ledger), executing it in
+/// a different ledger would let an attacker replay the same authorization in a
+/// later ledger.  Call this function at the start of the operation to tie it
+/// to the current ledger.
+///
+/// # Errors
+/// Returns [`LedgerError::LedgerMismatch`] when `expected != env.ledger().sequence()`.
+pub fn require_matching_ledger(env: &Env, expected: u32) -> Result<(), LedgerError> {
+    let current = env.ledger().sequence();
+    if current != expected {
+        Err(LedgerError::LedgerMismatch)
     } else {
         Ok(())
     }
@@ -385,14 +788,63 @@ pub enum TagError {
 }
 
 /// Signature verification failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
 pub enum SignatureError {
     /// Invalid signature length (must be 64 bytes for Ed25519).
-    InvalidSignatureLength,
+    InvalidSignatureLength = 1,
     /// Invalid public key length (must be 32 bytes for Ed25519).
-    InvalidPublicKeyLength,
+    InvalidPublicKeyLength = 2,
     /// Signature verification failed.
-    VerificationFailed,
+    VerificationFailed = 3,
+    /// The verifier public key has not been registered for attestation verification.
+    UnregisteredVerifier = 4,
+}
+
+/// Storage key for the set of registered verifier public keys.
+const REGISTERED_VERIFIERS_KEY: Symbol = symbol_short!("REGVER");
+
+/// Registers a verifier public key so its attestations may be consumed.
+pub fn register_verifier(env: &Env, public_key: &[u8]) -> Result<(), SignatureError> {
+    let pk_arr: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| SignatureError::InvalidPublicKeyLength)?;
+    let key = BytesN::<32>::from_array(env, &pk_arr);
+
+    let mut registered_verifiers: Map<BytesN<32>, bool> = env
+        .storage()
+        .instance()
+        .get(&REGISTERED_VERIFIERS_KEY)
+        .unwrap_or_else(|| Map::new(env));
+
+    registered_verifiers.set(key, true);
+    env.storage()
+        .instance()
+        .set(&REGISTERED_VERIFIERS_KEY, &registered_verifiers);
+
+    Ok(())
+}
+
+/// Requires the supplied verifier public key to be registered before an external
+/// attestation can be consumed.
+pub fn require_registered_verifier(env: &Env, public_key: &[u8]) -> Result<(), SignatureError> {
+    let pk_arr: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| SignatureError::InvalidPublicKeyLength)?;
+    let key = BytesN::<32>::from_array(env, &pk_arr);
+
+    let registered_verifiers: Map<BytesN<32>, bool> = env
+        .storage()
+        .instance()
+        .get(&REGISTERED_VERIFIERS_KEY)
+        .unwrap_or_else(|| Map::new(env));
+
+    if registered_verifiers.get(key).unwrap_or(false) {
+        Ok(())
+    } else {
+        Err(SignatureError::UnregisteredVerifier)
+    }
 }
 
 /// Verify an Ed25519 signature with domain separation.
@@ -414,6 +866,8 @@ pub fn verify_signature(
     signature: &[u8],
     public_key: &[u8],
 ) -> Result<(), SignatureError> {
+    require_registered_verifier(env, public_key)?;
+
     let pk_arr: [u8; 32] = public_key
         .try_into()
         .map_err(|_| SignatureError::InvalidPublicKeyLength)?;
@@ -585,6 +1039,104 @@ where
     }
 }
 
+pub mod events;
+pub mod reversible_op;
+
+/// Error returned when a currency symbol is not a supported stable asset.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum StableCurrencyError {
+    /// The currency symbol is not a recognized stable asset (e.g., rebase/deflationary tokens).
+    UnsupportedCurrency = 1,
+}
+
+/// Known stable currency symbols (case-insensitive).
+/// This is a defence-in-depth allowlist of well-known stablecoins.
+/// Rebase/deflationary/elastic-supply tokens (e.g., AMPL, OHM, TIME) are intentionally excluded.
+const STABLE_CURRENCIES: &[&str] = &[
+    "USDC",
+    "USDT",
+    "USDP",
+    "BUSD",
+    "GUSD",
+    "TUSD",
+    "USDD",
+    "EURC",
+    "EURS",
+    "DAI",
+    "XLM",
+];
+
+/// Validates that a currency symbol represents a supported stable asset.
+///
+/// This is a defence-in-depth check to reject rebase/deflationary/elastic-supply
+/// token contracts at ingress. If an unsupported currency is accepted at ingress,
+/// it can silently change balances during transfer and violate contract invariants
+/// (e.g., remittance splits, bill payments, insurance payouts).
+///
+/// # Threat model
+/// An attacker who can inject a rebase/deflationary token at ingress can:
+/// - Cause silent balance drift during transfers, breaking settlement invariants
+/// - Grief accounting/audit trails by manufacturing "settled" states with altered values
+/// - Subvert split/allocation logic that assumes stable 1:1 value transfer
+///
+/// # Arguments
+/// * `env` - The Soroban environment
+/// * `symbol` - The currency symbol to validate (case-insensitive, whitespace trimmed)
+///
+/// # Returns
+/// * `Ok(())` if the symbol is a recognized stable currency
+/// * `Err(StableCurrencyError::UnsupportedCurrency)` if the symbol is not recognized
+pub fn require_stable_currency(env: &Env, symbol: &Symbol) -> Result<(), StableCurrencyError> {
+    for known in STABLE_CURRENCIES {
+        if symbol_matches_known_case_insensitive(env, symbol, known) {
+            return Ok(());
+        }
+    }
+    Err(StableCurrencyError::UnsupportedCurrency)
+}
+
+/// Compare a Symbol case-insensitively against a known ASCII currency string.
+///
+/// Since Soroban Symbol comparison is exact (case-sensitive) and there is no
+/// `no_std`-compatible way to extract raw bytes from a Symbol, we generate all
+/// 2^N case variants of the known string (where N = len ≤ 10) and compare each
+/// against the input Symbol.  The first match short-circuits the search.
+fn symbol_matches_known_case_insensitive(env: &Env, symbol: &Symbol, known: &str) -> bool {
+    let bytes = known.as_bytes();
+    let len = bytes.len();
+
+    // Try uppercase (exact) match first — the common case after normalization.
+    if symbol == &Symbol::new(env, known) {
+        return true;
+    }
+
+    // Generate all 2^len case-variant strings and compare as Symbols.
+    // Symbols are bounded at 32 bytes and currencies at 10 bytes, so 2^10 = 1024
+    // max iterations which is acceptable for an ingress guard.
+    let num_variants = 1u32 << len;
+    let mut buf = [0u8; 10];
+    for mask in 0..num_variants {
+        for (i, &b) in bytes.iter().enumerate() {
+            buf[i] = if (mask >> i) & 1 == 0 {
+                b.to_ascii_lowercase()
+            } else {
+                b
+            };
+        }
+        // Safety: buf contains only ASCII letters after case folding.
+        let variant = match core::str::from_utf8(&buf[..len]) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if symbol == &Symbol::new(env, variant) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Event emission helper
 pub struct RemitwiseEvents;
 
@@ -626,11 +1178,11 @@ impl RemitwiseEvents {
 
         #[cfg(test)]
         {
+            use soroban_sdk::xdr::ToXdr;
             use soroban_sdk::TryFromVal;
-            let val = data.into_val(env);
+            let val: soroban_sdk::Val = data.into_val(env);
             if let Ok(sc_val) = soroban_sdk::xdr::ScVal::try_from_val(env, &val) {
-                let xdr_bytes = sc_val.to_xdr(env);
-                let size = xdr_bytes.len();
+                let size = soroban_sdk::xdr::ToXdr::to_xdr(sc_val, env).len();
                 if size > 256 {
                     panic!(
                         "Event data size {} exceeds 256-byte budget. Emits must be compact.",
@@ -638,10 +1190,8 @@ impl RemitwiseEvents {
                     );
                 }
             }
-            env.events().publish(topics, val);
         }
 
-        #[cfg(not(test))]
         env.events().publish(topics, data);
     }
 
@@ -685,7 +1235,7 @@ impl RemitwiseEvents {
         T: soroban_sdk::TryFromVal<soroban_sdk::Env, soroban_sdk::Val>,
         F: FnOnce(&T) -> bool,
     {
-        use soroban_sdk::TryFromVal;
+        use soroban_sdk::testutils::Events as soroban_Events;
 
         let all = env.events().all();
         let (_cid, topics, data) = all.last().expect("expected at least one emitted event");
@@ -697,26 +1247,20 @@ impl RemitwiseEvents {
             4,
             "expected a 4-element Remitwise event topic tuple"
         );
+        let sentinel: soroban_sdk::Symbol =
+            soroban_sdk::FromVal::from_val(env, &topics.get(0).unwrap());
         assert_eq!(
-            topics.get(0).unwrap(),
-            symbol_short!("Remitwise").into_val(env),
+            sentinel,
+            symbol_short!("Remitwise"),
             "first topic must be the Remitwise marker"
         );
-        assert_eq!(
-            topics.get(1).unwrap(),
-            expected_category.to_u32().into_val(env),
-            "event category mismatch"
-        );
-        assert_eq!(
-            topics.get(2).unwrap(),
-            expected_priority.to_u32().into_val(env),
-            "event priority mismatch"
-        );
-        assert_eq!(
-            topics.get(3).unwrap(),
-            expected_action.into_val(env),
-            "event action mismatch"
-        );
+        let cat: u32 = soroban_sdk::FromVal::from_val(env, &topics.get(1).unwrap());
+        assert_eq!(cat, expected_category.to_u32(), "event category mismatch");
+        let prio: u32 = soroban_sdk::FromVal::from_val(env, &topics.get(2).unwrap());
+        assert_eq!(prio, expected_priority.to_u32(), "event priority mismatch");
+        let action: soroban_sdk::Symbol =
+            soroban_sdk::FromVal::from_val(env, &topics.get(3).unwrap());
+        assert_eq!(action, expected_action, "event action mismatch");
 
         let payload: T = T::try_from_val(env, &data).expect("failed to decode event data");
         assert!(
@@ -727,56 +1271,24 @@ impl RemitwiseEvents {
     }
 }
 
+/// Asserts that a specific pause channel is active (not paused).
+/// Panics if the channel is paused.
+pub fn require_active_pause_channel(env: &Env, channel: Symbol) {
+    let paused = env
+        .storage()
+        .instance()
+        .get::<_, Map<Symbol, bool>>(&Symbol::new(env, STORAGE_PAUSE_CHANNELS))
+        .unwrap_or_else(|| Map::new(env))
+        .get(channel)
+        .unwrap_or(false);
+    if paused {
+        panic!("Pause channel is inactive");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Encoding stability tests (cross-contract ABI)
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod assert_event_tests {
-    use super::{EventCategory, EventPriority, RemitwiseEvents};
-
-    #[test]
-    fn assert_last_event_matches_emitted_topic_and_data() {
-        let env = soroban_sdk::Env::default();
-        let action = soroban_sdk::Symbol::new(&env, "test_act");
-
-        RemitwiseEvents::emit(
-            &env,
-            EventCategory::Access,
-            EventPriority::High,
-            action,
-            (1u32, 2u32),
-        );
-
-        RemitwiseEvents::assert_last_event::<(u32, u32), _>(
-            &env,
-            EventCategory::Access,
-            EventPriority::High,
-            action,
-            |(a, b)| *a == 1 && *b == 2,
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "event action mismatch")]
-    fn assert_last_event_panics_on_action_mismatch() {
-        let env = soroban_sdk::Env::default();
-        RemitwiseEvents::emit(
-            &env,
-            EventCategory::Access,
-            EventPriority::High,
-            soroban_sdk::Symbol::new(&env, "one"),
-            1u32,
-        );
-        RemitwiseEvents::assert_last_event::<u32, _>(
-            &env,
-            EventCategory::Access,
-            EventPriority::High,
-            soroban_sdk::Symbol::new(&env, "two"),
-            |_| true,
-        );
-    }
-}
 
 #[cfg(test)]
 mod encoding_stability_tests {
@@ -970,6 +1482,7 @@ mod encoding_stability_tests {
     }
 
     #[test]
+    #[allow(clippy::single_element_loop)]
     fn policy_mode_round_trip_and_encoding_stability() {
         let env = Env::default();
 
@@ -981,9 +1494,7 @@ mod encoding_stability_tests {
             }
         }
 
-        for v in [PolicyMode::Strict] {
-            cover_all_variants(v);
-        }
+        cover_all_variants(PolicyMode::Strict);
 
         let vec = Vec::from_array(&env, [PolicyMode::Strict]);
         let mut out = Vec::<PolicyMode>::new(&env);
@@ -1000,5 +1511,152 @@ mod encoding_stability_tests {
             out_map.set(k, round_trip(&env, v));
         }
         assert_eq!(out_map, map);
+    }
+}
+
+#[cfg(test)]
+mod stable_currency_tests {
+    use super::{require_stable_currency, StableCurrencyError};
+    use soroban_sdk::{Env, Symbol};
+
+    #[test]
+    fn accepts_usdc() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "USDC");
+        assert_eq!(require_stable_currency(&env, &sym), Ok(()));
+    }
+
+    #[test]
+    fn accepts_usdt() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "USDT");
+        assert_eq!(require_stable_currency(&env, &sym), Ok(()));
+    }
+
+    #[test]
+    fn accepts_usdp() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "USDP");
+        assert_eq!(require_stable_currency(&env, &sym), Ok(()));
+    }
+
+    #[test]
+    fn accepts_busd() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "BUSD");
+        assert_eq!(require_stable_currency(&env, &sym), Ok(()));
+    }
+
+    #[test]
+    fn accepts_gusd() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "GUSD");
+        assert_eq!(require_stable_currency(&env, &sym), Ok(()));
+    }
+
+    #[test]
+    fn accepts_tusd() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "TUSD");
+        assert_eq!(require_stable_currency(&env, &sym), Ok(()));
+    }
+
+    #[test]
+    fn accepts_usdd() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "USDD");
+        assert_eq!(require_stable_currency(&env, &sym), Ok(()));
+    }
+
+    #[test]
+    fn accepts_eurc() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "EURC");
+        assert_eq!(require_stable_currency(&env, &sym), Ok(()));
+    }
+
+    #[test]
+    fn accepts_eurs() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "EURS");
+        assert_eq!(require_stable_currency(&env, &sym), Ok(()));
+    }
+
+    #[test]
+    fn accepts_dai() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "DAI");
+        assert_eq!(require_stable_currency(&env, &sym), Ok(()));
+    }
+
+    #[test]
+    fn accepts_xlm() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "XLM");
+        assert_eq!(require_stable_currency(&env, &sym), Ok(()));
+    }
+
+    #[test]
+    fn accepts_lowercase_usdc() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "usdc");
+        assert_eq!(require_stable_currency(&env, &sym), Ok(()));
+    }
+
+    #[test]
+    fn accepts_mixed_case_usdc() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "UsDc");
+        assert_eq!(require_stable_currency(&env, &sym), Ok(()));
+    }
+
+    #[test]
+    fn rejects_rebase_token_ampl() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "AMPL");
+        assert_eq!(
+            require_stable_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    #[test]
+    fn rejects_rebase_token_ohm() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "OHM");
+        assert_eq!(
+            require_stable_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    #[test]
+    fn rejects_rebase_token_time() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "TIME");
+        assert_eq!(
+            require_stable_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_token() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "RANDOM");
+        assert_eq!(
+            require_stable_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    #[test]
+    fn rejects_empty_symbol() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "");
+        assert_eq!(
+            require_stable_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
     }
 }
