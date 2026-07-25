@@ -4313,4 +4313,76 @@ mod tests {
         assert_eq!(first.payload, second.payload);
         assert_eq!(first.header.checksum, second.header.checksum);
     }
+
+    // --- RemittanceSplitExport specific migration tests ---
+
+    #[test]
+    fn test_remittance_split_export_import_happy_path() {
+        let payload = SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
+            owner: "GABC...".into(),
+            spending_percent: 5000,
+            savings_percent: 3000,
+            bills_percent: 1500,
+            insurance_percent: 500,
+        });
+
+        let snapshot = ExportSnapshot::new(payload, ExportFormat::Json);
+        assert!(snapshot.verify_checksum());
+
+        let bytes = export_to_json(&snapshot).unwrap();
+        let mut tracker = MigrationTracker::new();
+        let imported = import_from_json(&bytes, &mut tracker, 1_000).unwrap();
+        
+        assert_eq!(snapshot.payload, imported.payload);
+        assert!(tracker.is_imported(&imported));
+    }
+
+    #[test]
+    fn test_remittance_split_export_import_invalid_percentages() {
+        // Percentages sum to 9900 (invalid)
+        let payload = SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
+            owner: "GABC...".into(),
+            spending_percent: 5000,
+            savings_percent: 3000,
+            bills_percent: 1400, // changed
+            insurance_percent: 500,
+        });
+
+        let snapshot = ExportSnapshot::new(payload, ExportFormat::Json);
+        let bytes = export_to_json(&snapshot).unwrap();
+        let mut tracker = MigrationTracker::new();
+        
+        let result = import_from_json(&bytes, &mut tracker, 1_000);
+        assert!(matches!(result, Err(MigrationError::ValidationFailed)));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn test_remittance_split_export_import_property_test(
+            owner in "\\PC*",
+            spending in 0..10000u32,
+            savings in 0..10000u32,
+            bills in 0..10000u32,
+        ) {
+            // Ensure sum <= 10000
+            let sum = spending as u64 + savings as u64 + bills as u64;
+            if sum > 10000 { return Ok(()); }
+            let insurance = 10000 - sum as u32;
+            
+            let payload = SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
+                owner,
+                spending_percent: spending,
+                savings_percent: savings,
+                bills_percent: bills,
+                insurance_percent: insurance,
+            });
+
+            let snapshot = ExportSnapshot::new(payload, ExportFormat::Json);
+            let bytes = export_to_json(&snapshot).unwrap();
+            let mut tracker = MigrationTracker::new();
+            
+            let imported = import_from_json(&bytes, &mut tracker, 1_000).unwrap();
+            assert_eq!(snapshot.payload, imported.payload);
+        }
+    }
 }
