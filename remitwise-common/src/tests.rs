@@ -1335,3 +1335,26 @@ proptest! {
         prop_assert_eq!(p.to_bps(), Ok(pct * 100));
     }
 }
+
+// ---------------------------------------------------------------------------
+// require_no_pending_dispute_epoch tests
+// ---------------------------------------------------------------------------
+#[test]
+fn test_require_no_pending_dispute_epoch_rejects_outdated() {
+    let env = Env::default();
+    env.mock_all_auths();
+    // Simulate setting the current pending dispute epoch to 5
+    env.storage().instance().set(&symbol_short!("DISP_EP"), &5u64);
+    
+    // Negative test: An outdated epoch (e.g. 3) must fail
+    let res = require_no_pending_dispute_epoch(&env, 3);
+    assert_eq!(res, Err(DisputeError::OutdatedEpoch));
+    
+    // Equal epoch (5) must pass
+    let res = require_no_pending_dispute_epoch(&env, 5);
+    assert_eq!(res, Ok(()));
+
+    // Future epoch (6) must pass
+    let res = require_no_pending_dispute_epoch(&env, 6);
+    assert_eq!(res, Ok(()));
+}

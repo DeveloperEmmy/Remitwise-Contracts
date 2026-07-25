@@ -144,6 +144,16 @@ pub enum BytesReturnError {
     ReturnTooLarge = 1,
 }
 
+/// Error returned when a dispute-related operation is attempted in an outdated epoch.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum DisputeError {
+    /// The epoch is outdated and cannot be used for dispute ops.
+    OutdatedEpoch = 1,
+}
+
+
 /// Maximum allowed byte length for a short (inline) Symbol.
 ///
 /// The Soroban SDK stores symbols ≤ 9 bytes inline as short symbols;
@@ -203,6 +213,27 @@ pub fn guard_bytes_len(bytes: &Bytes) -> Result<(), BytesReturnError> {
     } else {
         Ok(())
     }
+}
+
+/// Guards against executing dispute-related operations in an outdated epoch.
+///
+/// This is a defence-in-depth fix. If an attacker could proceed with dispute-related 
+/// operations in an outdated epoch, they could bypass lifecycle expiration rules, 
+/// allowing them to manipulate dispute resolutions or lock funds unexpectedly.
+///
+/// # Arguments
+/// * `env` - Soroban environment
+/// * `ep` - The dispute epoch supplied by the caller
+///
+/// # Returns
+/// * `Ok(())` if the epoch is greater than or equal to the current pending dispute epoch
+/// * `Err(DisputeError::OutdatedEpoch)` if the epoch is outdated
+pub fn require_no_pending_dispute_epoch(env: &Env, ep: u64) -> Result<(), DisputeError> {
+    let current_epoch: u64 = env.storage().instance().get(&symbol_short!("DISP_EP")).unwrap_or(0);
+    if ep < current_epoch {
+        return Err(DisputeError::OutdatedEpoch);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
