@@ -83,14 +83,38 @@ pub fn remove_tags_from_policy(
 )
 ```
 
-### Tag Validation
+### Tag Validation and Canonicalization
 
-All contracts enforce the following validation rules:
+All contracts enforce consistent validation and normalization rules to ensure safe indexing and predictable off-chain search behavior:
 
+#### Validation Rules
 - Tags cannot be empty (at least one tag must be provided)
 - Each tag must be between 1 and 32 characters in length
-- Tags are case-sensitive
+- Allowed character set: `[a-z0-9-_]` (lowercase letters, digits, hyphens, underscores)
+- Uppercase letters are automatically normalized to lowercase
 - Duplicate tags are allowed
+
+#### Canonicalization Process
+Tags are normalized before storage using the following rules:
+1. **Case normalization**: All uppercase letters (A-Z) are converted to lowercase (a-z)
+2. **Character validation**: Only alphanumeric characters, hyphens (-), and underscores (_) are allowed
+3. **Length validation**: Tags must be 1-32 characters after normalization
+4. **Rejection**: Tags with invalid characters (e.g., @, !, #, spaces) are rejected with an error
+
+#### Shared helpers (`remitwise-common`)
+Tag validation is centralized in `remitwise-common`:
+
+- **`canonicalize_tags_checked(env, tags) -> Result<Vec<String>, TagError>`** — preferred for untrusted or indexer-supplied input. Returns typed errors (`Empty`, `TooLong`, `InvalidChar { position }`) and short-circuits on the first violation.
+- **`canonicalize_tags(env, tags, on_invalid_char)`** — legacy panic-based wrapper retained for backward compatibility. New contract code should prefer the checked variant and map `TagError` to each crate's contract errors (e.g. `SavingsGoalError::InvalidTagContent`).
+
+`TAG_MAX_LEN` (32) in `remitwise-common` is the single source of truth for maximum tag length.
+
+#### Examples
+- `"URGENT-1_Tag"` → `"urgent-1_tag"` (normalized)
+- `"Monthly-Bill"` → `"monthly-bill"` (normalized)
+- `"invalid@tag!"` → **rejected** (invalid characters)
+- `""` → **rejected** (empty)
+- `"a" * 33` → **rejected** (too long)
 
 ### Events
 
@@ -181,15 +205,17 @@ When a recurring bill is paid and a new bill is created, the tags are copied to 
 ## Error Handling
 
 ### Bill Payments Contract
-- `Error::EmptyTags` (12): Returned when trying to add/remove an empty tag list
-- `Error::InvalidTag` (13): Returned when a tag is invalid (empty or > 32 characters)
-- `Error::Unauthorized` (5): Returned when a non-owner tries to modify tags
-- `Error::BillNotFound` (1): Returned when the bill doesn't exist
+- `Error::EmptyTags` (14): Panics when trying to add/remove an empty tag list
+- `Error::InvalidTag` (13): Panics when a tag is invalid (empty or > 32 characters)
+- `Error::InvalidTagContent` (19): Panics when a tag contains invalid characters (not in [a-z0-9-_])
+- `Error::Unauthorized` (5): Panics when a non-owner tries to modify tags
+- `Error::BillNotFound` (1): Panics when the bill doesn't exist
 
 ### Savings Goals & Insurance Contracts
 These contracts use panics for error handling:
 - "Tags cannot be empty": When trying to add/remove an empty tag list
 - "Tag must be between 1 and 32 characters": When a tag is invalid
+- `SavingsGoalError::InvalidTagContent`: When a tag contains invalid characters
 - "Only the [entity] owner can [add/remove] tags": When unauthorized
 - "[Entity] not found": When the entity doesn't exist
 
@@ -201,5 +227,5 @@ Potential improvements for the tagging system:
 2. **Tag Analytics**: Aggregate statistics by tag (e.g., total amount by tag)
 3. **Tag Suggestions**: Auto-suggest tags based on entity names or patterns
 4. **Tag Limits**: Enforce maximum number of tags per entity
-5. **Tag Normalization**: Automatically normalize tags (lowercase, trim whitespace)
-6. **Predefined Tags**: Support for system-defined tag categories
+5. **Predefined Tags**: Support for system-defined tag categories
+6. **Tag Search Index**: On-chain search index for tag-based queries

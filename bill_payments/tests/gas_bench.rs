@@ -1,5 +1,5 @@
-use bill_payments::{BillPayments, BillPaymentsClient, Error};
-use remitwise_common::MAX_BATCH_SIZE;
+use bill_payments::{BillPayments, BillPaymentsClient, Error, CANCEL_BILL_RATE_LIMIT};
+use remitwise_common::{MAX_BATCH_SIZE, RATE_LIMIT_WINDOW_SECONDS};
 use soroban_sdk::testutils::{Address as AddressTrait, EnvTestConfig, Ledger, LedgerInfo};
 use soroban_sdk::{Address, Env, String, Vec};
 
@@ -144,6 +144,16 @@ fn set_time(env: &Env, timestamp: u64) {
     });
 }
 
+/// Cancel bills while respecting per-address cancel rate limits in tests.
+fn cancel_many_bills(client: &BillPaymentsClient, env: &Env, owner: &Address, bill_ids: &Vec<u32>) {
+    for (i, bill_id) in bill_ids.iter().enumerate() {
+        if i > 0 && (i as u32).is_multiple_of(CANCEL_BILL_RATE_LIMIT) {
+            set_time(env, env.ledger().timestamp() + RATE_LIMIT_WINDOW_SECONDS);
+        }
+        client.cancel_bill(owner, &bill_id);
+    }
+}
+
 fn measure<F, R>(env: &Env, f: F) -> (u64, u64, R)
 where
     F: FnOnce() -> R,
@@ -233,10 +243,12 @@ fn create_many_overdue(
     ids
 }
 
+#[allow(dead_code)]
 fn max_allowed(baseline: u64, threshold_percent: u64) -> u64 {
     baseline + baseline.saturating_mul(threshold_percent) / 100
 }
 
+#[allow(dead_code)]
 fn assert_regression_bounds(
     method: &str,
     scenario: &str,
@@ -598,6 +610,63 @@ fn bench_get_overdue_bills_page_first_1000_total() {
         cpu,
         mem,
         OVERDUE_BILLS_PAGE_1000,
+    );
+}
+
+/// Scale guard: `get_overdue_bills` cost must track the active result set, not the
+/// global `NEXT_ID` high-water mark.
+///
+/// We hold the overdue result set fixed (10 bills) and inflate `NEXT_ID` by
+/// creating-then-cancelling 80 filler bills. Cancelled bills leave `OWN_IDX`, so the
+/// owner-index walk does identical work in both scenarios. With the previous
+/// `1..=NEXT_ID` scan, scenario B (`NEXT_ID == 90`) would have cost ~9x scenario A
+/// (`NEXT_ID == 10`); the index walk keeps the cost flat.
+#[test]
+fn scale_get_overdue_bills_independent_of_next_id() {
+    // Scenario A: 10 overdue bills, NEXT_ID == 10.
+    let env_a = bench_env();
+    let id_a = env_a.register_contract(None, BillPayments);
+    let client_a = BillPaymentsClient::new(&env_a, &id_a);
+    let owner_a = <Address as AddressTrait>::generate(&env_a);
+    create_many_overdue(&client_a, &env_a, &owner_a, "OverdueA", 10);
+    let (cpu_a, mem_a, page_a) = measure(&env_a, || client_a.get_overdue_bills(&0u32, &50u32));
+    assert_eq!(page_a.count, 10);
+
+    // Scenario B: same 10 overdue bills, but NEXT_ID inflated to 90 via create+cancel.
+    let env_b = bench_env();
+    let id_b = env_b.register_contract(None, BillPayments);
+    let client_b = BillPaymentsClient::new(&env_b, &id_b);
+    let owner_b = <Address as AddressTrait>::generate(&env_b);
+    create_many_overdue(&client_b, &env_b, &owner_b, "OverdueB", 10);
+    let filler = create_many_unpaid(&client_b, &env_b, &owner_b, "Filler", 80);
+    cancel_many_bills(&client_b, &env_b, &owner_b, &filler);
+    let (cpu_b, mem_b, page_b) = measure(&env_b, || client_b.get_overdue_bills(&0u32, &50u32));
+    assert_eq!(
+        page_b.count, 10,
+        "filler bills cancelled: only the 10 overdue bills remain"
+    );
+
+    // Allow a small tolerance for incidental differences; the key invariant is that
+    // a 9x larger NEXT_ID does NOT translate into a 9x larger query cost.
+    assert!(
+        cpu_b <= cpu_a + cpu_a / 5,
+        "overdue cpu must not scale with NEXT_ID: A(next_id=10)={}, B(next_id=90)={}",
+        cpu_a,
+        cpu_b
+    );
+    assert!(
+        mem_b <= mem_a + mem_a / 5,
+        "overdue mem must not scale with NEXT_ID: A(next_id=10)={}, B(next_id=90)={}",
+        mem_a,
+        mem_b
+    );
+
+    emit_bench_result(
+        "get_overdue_bills",
+        "next_id_10_vs_90_fixed_10_result",
+        cpu_b,
+        mem_b,
+        OVERDUE_BILLS_PAGE_50,
     );
 }
 
