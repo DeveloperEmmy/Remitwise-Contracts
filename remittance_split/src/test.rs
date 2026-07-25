@@ -2439,6 +2439,31 @@ fn test_not_initialized_fails() {
 }
 
 #[test]
+fn test_treasury_balance_returns_configured_usdc_balance() {
+    let env = Env::default();
+    let harness = setup_split(&env, 4_000, 3_000, 2_000, 1_000);
+    let treasury = Address::generate(&env);
+    let balance = 42_000_000i128;
+
+    harness.client.propose_treasury(&harness.owner, &treasury);
+    harness.client.accept_treasury(&treasury);
+    harness.stellar_client.mint(&treasury, &balance);
+
+    assert_eq!(harness.client.treasury_balance(), balance);
+}
+
+#[test]
+fn test_treasury_balance_rejects_unconfigured_treasury() {
+    let env = Env::default();
+    let harness = setup_split(&env, 4_000, 3_000, 2_000, 1_000);
+
+    assert_eq!(
+        harness.client.try_treasury_balance(),
+        Err(Ok(RemittanceSplitError::TreasuryNotConfigured))
+    );
+}
+
+#[test]
 fn test_initialize_split_percentage_out_of_range() {
     let env = Env::default();
     env.mock_all_auths();
