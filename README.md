@@ -18,7 +18,7 @@ This workspace contains the core smart contracts that power RemitWise's post-rem
 - **[docs/PERIOD_INVARIANTS.md](docs/PERIOD_INVARIANTS.md)**: Time-bound period invariants, ledger timestamp rules, and execution windows
 - **[docs/PERIOD_KEYS.md](docs/PERIOD_KEYS.md)**: Model + consumer contract for `period_key` period identifiers and report storage
 - **[docs/AMOUNT_INVARIANTS.md](docs/AMOUNT_INVARIANTS.md)**: Amount zero-handling rules across contract entrypoints
-- **[docs/config-lifecycle.md](docs/config-lifecycle.md)**: Configuration keys lifecycle (adding, deprecating, removing)
+- **[docs/CROSS_CONTRACT_INVARIANTS.md](docs/CROSS_CONTRACT_INVARIANTS.md)**: Invariants that span multiple contracts — split conservation, replay protection, epoch guards, and reviewer checklist
 
 ## Shared Components
 

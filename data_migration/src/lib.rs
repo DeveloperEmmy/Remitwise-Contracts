@@ -580,6 +580,11 @@ pub enum MigrationError {
     ValidationFailed(String),
     DeserializeError(String),
     DuplicateImport,
+    /// Returned by [`verify_migration_completed`] when the caller attempts a write
+    /// operation before the migration has been explicitly marked complete via
+    /// [`MigrationTracker::mark_completed`]. This guard prevents partially-applied
+    /// migrations from being overwritten with live writes before they are finished.
+    MigrationNotCompleted,
 }
 
 impl std::fmt::Display for MigrationError {
@@ -624,6 +629,10 @@ impl std::fmt::Display for MigrationError {
             MigrationError::ValidationFailed(s) => write!(f, "validation failed: {}", s),
             MigrationError::DeserializeError(s) => write!(f, "deserialize error: {}", s),
             MigrationError::DuplicateImport => write!(f, "duplicate payload import detected"),
+            MigrationError::MigrationNotCompleted => write!(
+                f,
+                "migration not completed: write operations are not permitted until the migration is marked complete"
+            ),
         }
     }
 }
@@ -634,13 +643,36 @@ impl std::error::Error for MigrationError {}
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MigrationTracker {
     imported_payloads: HashMap<(String, u32), u64>,
+    /// Set to `true` after the operator explicitly calls `mark_completed`.
+    /// [`verify_migration_completed`] checks this flag and returns
+    /// [`MigrationError::MigrationNotCompleted`] until it is set.
+    pub completed: bool,
 }
 
 impl MigrationTracker {
     pub fn new() -> Self {
         Self {
             imported_payloads: HashMap::new(),
+            completed: false,
         }
+    }
+
+    /// Mark the migration as fully applied and ready for live writes.
+    ///
+    /// Call this only after every import step has succeeded and the contract
+    /// state is in a coherent, fully-migrated condition. After this call,
+    /// [`verify_migration_completed`] will no longer return an error.
+    ///
+    /// This is intentionally separate from the last `mark_imported` call so
+    /// that multi-step migrations can import several snapshots before signalling
+    /// completion.
+    pub fn mark_completed(&mut self) {
+        self.completed = true;
+    }
+
+    /// Returns `true` if the migration has been marked complete.
+    pub fn is_completed(&self) -> bool {
+        self.completed
     }
 
     /// Mark a payload as imported.
@@ -670,6 +702,43 @@ impl MigrationTracker {
     pub fn unmark_imported_by_identity(&mut self, checksum: &str, version: u32) {
         let identity = (checksum.to_string(), version);
         self.imported_payloads.remove(&identity);
+    }
+}
+
+/// Check that a migration has been explicitly marked complete before allowing writes.
+///
+/// # Threat mitigated
+///
+/// Without this gate a contract could begin accepting live writes over a
+/// partially-applied migration, producing an inconsistent mix of migrated and
+/// un-migrated data. This is especially dangerous during a batched or
+/// multi-step migration that is interrupted mid-way: subsequent writes would
+/// silently land on top of an incomplete on-chain state, and the corruption
+/// would only surface when the missing records are referenced.
+///
+/// # Usage
+///
+/// Call this function at the top of every write entrypoint that operates on
+/// data that may be in the process of being migrated. If the `tracker` has not
+/// had [`MigrationTracker::mark_completed`] called on it, this function returns
+/// [`MigrationError::MigrationNotCompleted`] and the caller should propagate
+/// that error without performing any state mutation.
+///
+/// ```rust
+/// use data_migration::{MigrationTracker, verify_migration_completed};
+///
+/// fn some_write_entrypoint(tracker: &MigrationTracker, value: u32) -> Result<(), data_migration::MigrationError> {
+///     // Defence-in-depth: refuse writes until migration is marked complete.
+///     verify_migration_completed(tracker)?;
+///     // ... perform write ...
+///     Ok(())
+/// }
+/// ```
+pub fn verify_migration_completed(tracker: &MigrationTracker) -> Result<(), MigrationError> {
+    if tracker.is_completed() {
+        Ok(())
+    } else {
+        Err(MigrationError::MigrationNotCompleted)
     }
 }
 
@@ -4547,6 +4616,421 @@ mod tests {
         assert!(
             tracker.is_imported(&snapshot),
             "binary-format import must also reach Completed state"
+        );
+    }
+}
+
+// =============================================================================
+// Issue #1281 — verify_migration_completed() tests
+//
+// These tests exercise the write-gate helper that prevents live writes from
+// landing on top of an incomplete migration. The negative test (writing before
+// completion) is the primary acceptance criterion.
+// =============================================================================
+#[cfg(test)]
+mod verify_migration_completed_tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Happy path: after mark_completed the gate opens.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn verify_migration_completed_passes_after_mark_completed() {
+        let mut tracker = MigrationTracker::new();
+        tracker.mark_completed();
+
+        assert_eq!(
+            verify_migration_completed(&tracker),
+            Ok(()),
+            "verify_migration_completed must return Ok after mark_completed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Negative test: before mark_completed the gate is closed.
+    //
+    // This is the primary acceptance criterion for issue #1281.
+    // -----------------------------------------------------------------------
+
+    /// A write operation attempted before the migration is marked complete must
+    /// be rejected with MigrationError::MigrationNotCompleted.
+    ///
+    /// Threat mitigated: without this guard a caller could perform writes over
+    /// partially-applied on-chain state (e.g. a multi-step migration interrupted
+    /// mid-way), silently mixing migrated and un-migrated records in the same
+    /// storage namespace. The corruption surfaces only when the missing records
+    /// are later referenced — long after the migration window has closed.
+    #[test]
+    fn verify_migration_completed_rejects_before_mark_completed() {
+        let tracker = MigrationTracker::new();
+
+        assert_eq!(
+            verify_migration_completed(&tracker),
+            Err(MigrationError::MigrationNotCompleted),
+            "verify_migration_completed must return Err(MigrationNotCompleted) \
+             before mark_completed is called — write operations must be refused \
+             until the migration gate is explicitly opened"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // is_completed reflects the flag state.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_completed_is_false_on_new_tracker() {
+        let tracker = MigrationTracker::new();
+        assert!(!tracker.is_completed(), "new tracker must not be completed");
+    }
+
+    #[test]
+    fn is_completed_is_true_after_mark_completed() {
+        let mut tracker = MigrationTracker::new();
+        tracker.mark_completed();
+        assert!(
+            tracker.is_completed(),
+            "tracker must report completed after mark_completed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // mark_completed is idempotent (calling twice must not panic or change state).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mark_completed_is_idempotent() {
+        let mut tracker = MigrationTracker::new();
+        tracker.mark_completed();
+        tracker.mark_completed(); // second call must be a no-op
+        assert!(tracker.is_completed());
+        assert_eq!(verify_migration_completed(&tracker), Ok(()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Error display message is meaningful.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migration_not_completed_error_display_is_descriptive() {
+        let msg = MigrationError::MigrationNotCompleted.to_string();
+        assert!(
+            msg.contains("migration not completed"),
+            "error message should mention 'migration not completed': {msg}"
+        );
+        assert!(
+            msg.contains("write"),
+            "error message should mention writes: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Completed flag is independent of the import tracker.
+    // A tracker can have imports recorded but still not be completed.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn can_have_imports_without_being_completed() {
+        let snapshot = ExportSnapshot::new(
+            SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
+                owner: "GABC".into(),
+                spending_percent: 5000,
+                savings_percent: 3000,
+                bills_percent: 1500,
+                insurance_percent: 500,
+            }),
+            ExportFormat::Json,
+        );
+        let bytes = export_to_json(&snapshot).unwrap();
+
+        let mut tracker = MigrationTracker::new();
+        import_from_json(&bytes, &mut tracker, 1_000).unwrap();
+
+        // Import recorded but not yet completed — write gate must still be closed.
+        assert!(tracker.is_imported(&snapshot));
+        assert!(!tracker.is_completed());
+        assert_eq!(
+            verify_migration_completed(&tracker),
+            Err(MigrationError::MigrationNotCompleted),
+            "having imports recorded does not implicitly open the write gate"
+        );
+
+        // Explicitly complete the migration — gate opens.
+        tracker.mark_completed();
+        assert_eq!(verify_migration_completed(&tracker), Ok(()));
+    }
+}
+
+// =============================================================================
+// Issue #1279 — Upgrade-epoch guard boundary tests
+//
+// `check_version_compatibility` (data_migration/src/lib.rs) enforces the
+// schema-version boundary for migration imports:
+//   - Accepted range: MIN_SUPPORTED_VERSION ..= SCHEMA_VERSION  (inclusive)
+//   - Anything outside that range is rejected with IncompatibleVersion
+//
+// These tests cover the same tiers as the orchestrator epoch-guard suite
+// (orchestrator/tests/dispute_epoch_guard.rs) but applied to the migration
+// schema version boundary:
+//
+//   • current  — SCHEMA_VERSION is accepted
+//   • min      — MIN_SUPPORTED_VERSION is accepted (lower boundary)
+//   • prior    — MIN_SUPPORTED_VERSION - 1 is rejected (one below the floor)
+//   • ancient  — 0 is always rejected (no staleness window)
+//   • future   — SCHEMA_VERSION + 1 is rejected (no forward acceptance)
+//   • sweep    — representative values outside the window all produce the
+//                same typed IncompatibleVersion error (with correct bounds)
+//   • snapshot — ExportSnapshot::is_version_compatible mirrors the check
+// =============================================================================
+#[cfg(test)]
+mod upgrade_epoch_guard_tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // `current` tier — SCHEMA_VERSION is accepted.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn accepts_current_schema_version() {
+        assert_eq!(
+            check_version_compatibility(SCHEMA_VERSION),
+            Ok(()),
+            "SCHEMA_VERSION ({}) must be accepted by the version guard",
+            SCHEMA_VERSION
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // `min` tier — MIN_SUPPORTED_VERSION is the lower boundary and is accepted.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn accepts_min_supported_version() {
+        assert_eq!(
+            check_version_compatibility(MIN_SUPPORTED_VERSION),
+            Ok(()),
+            "MIN_SUPPORTED_VERSION ({}) must be accepted — it is the lower boundary",
+            MIN_SUPPORTED_VERSION
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // `prior` tier — one below the floor is rejected.
+    //
+    // If MIN_SUPPORTED_VERSION > 0 we can check MIN - 1; if it is already 0
+    // we skip to the `ancient` test instead (which uses 0 directly). In
+    // practice MIN_SUPPORTED_VERSION == 1 for this codebase.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rejects_one_below_min_supported_version() {
+        if MIN_SUPPORTED_VERSION == 0 {
+            // Can't go below 0 for a u32; skip the off-by-one tier.
+            return;
+        }
+        let prior = MIN_SUPPORTED_VERSION - 1;
+        assert_eq!(
+            check_version_compatibility(prior),
+            Err(MigrationError::IncompatibleVersion {
+                found: prior,
+                min: MIN_SUPPORTED_VERSION,
+                max: SCHEMA_VERSION,
+            }),
+            "version {} (MIN - 1) must be rejected; equality at the floor is the only accepted boundary",
+            prior
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // `ancient` tier — version 0 is always rejected after bumps.
+    //
+    // Mirrors the orchestrator test `rejects_ancient_epoch_at_zero_after_many_bumps`.
+    // There is no staleness window and no special-cased leniency for version 0.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rejects_ancient_version_zero() {
+        // Version 0 predates the schema and must always be rejected.
+        // This pins the invariant: there is no staleness window, no lower
+        // leniency, and no special case for the "zeroth" version.
+        if MIN_SUPPORTED_VERSION == 0 {
+            // If the floor is 0 then 0 is accepted — constraint cannot be tested.
+            assert_eq!(check_version_compatibility(0), Ok(()));
+        } else {
+            assert_eq!(
+                check_version_compatibility(0),
+                Err(MigrationError::IncompatibleVersion {
+                    found: 0,
+                    min: MIN_SUPPORTED_VERSION,
+                    max: SCHEMA_VERSION,
+                }),
+                "version 0 must be rejected; there is no staleness window below MIN_SUPPORTED_VERSION"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // `future` tier — SCHEMA_VERSION + 1 is rejected.
+    //
+    // Mirrors `rejects_future_epoch_one_above_current` in the orchestrator suite.
+    // Pins the symmetry of the guard around the accepted window.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rejects_one_above_schema_version() {
+        let future = SCHEMA_VERSION + 1;
+        assert_eq!(
+            check_version_compatibility(future),
+            Err(MigrationError::IncompatibleVersion {
+                found: future,
+                min: MIN_SUPPORTED_VERSION,
+                max: SCHEMA_VERSION,
+            }),
+            "version {} (SCHEMA_VERSION + 1) must be rejected — forward versions are not accepted",
+            future
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Sweep — every value outside the accepted window produces the same typed
+    // IncompatibleVersion error with the correct min/max bounds.
+    //
+    // Includes an extreme value (u32::MAX) to catch any silent overflow
+    // or saturating-cast that could sneak into a boundary comparison.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rejects_representative_out_of_range_versions_with_identical_error_shape() {
+        // Build a list of clearly out-of-range values.
+        // We use saturating arithmetic so this works even if SCHEMA_VERSION == 0
+        // or MIN_SUPPORTED_VERSION == u32::MAX (contrived but safe).
+        let below_range: Vec<u32> = (0..MIN_SUPPORTED_VERSION)
+            .take(3) // at most: 0, 1, 2
+            .collect();
+        let above_range: Vec<u32> = [
+            SCHEMA_VERSION.saturating_add(1),
+            SCHEMA_VERSION.saturating_add(2),
+            SCHEMA_VERSION.saturating_add(100),
+            u32::MAX,
+        ]
+        .into_iter()
+        .filter(|&v| v > SCHEMA_VERSION) // guard against SCHEMA_VERSION == u32::MAX
+        .collect();
+
+        let out_of_range: Vec<u32> = below_range
+            .into_iter()
+            .chain(above_range)
+            .collect();
+
+        for version in out_of_range {
+            let result = check_version_compatibility(version);
+            assert_eq!(
+                result,
+                Err(MigrationError::IncompatibleVersion {
+                    found: version,
+                    min: MIN_SUPPORTED_VERSION,
+                    max: SCHEMA_VERSION,
+                }),
+                "version {} outside [{}..{}] must be rejected with IncompatibleVersion \
+                 carrying the correct min/max bounds",
+                version, MIN_SUPPORTED_VERSION, SCHEMA_VERSION
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ExportSnapshot::is_version_compatible must mirror check_version_compatibility.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn snapshot_is_version_compatible_accepts_schema_version() {
+        let snapshot = ExportSnapshot::new(
+            SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
+                owner: "G".into(),
+                spending_percent: 5000,
+                savings_percent: 3000,
+                bills_percent: 1500,
+                insurance_percent: 500,
+            }),
+            ExportFormat::Json,
+        );
+        assert_eq!(snapshot.header.version, SCHEMA_VERSION);
+        assert!(
+            snapshot.is_version_compatible(),
+            "a freshly-built snapshot at SCHEMA_VERSION must pass is_version_compatible"
+        );
+    }
+
+    #[test]
+    fn snapshot_is_version_compatible_rejects_future_version() {
+        let mut snapshot = ExportSnapshot::new(
+            SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
+                owner: "G".into(),
+                spending_percent: 5000,
+                savings_percent: 3000,
+                bills_percent: 1500,
+                insurance_percent: 500,
+            }),
+            ExportFormat::Json,
+        );
+        snapshot.header.version = SCHEMA_VERSION + 1;
+        assert!(
+            !snapshot.is_version_compatible(),
+            "snapshot with version SCHEMA_VERSION + 1 must fail is_version_compatible"
+        );
+    }
+
+    #[test]
+    fn snapshot_is_version_compatible_rejects_ancient_zero() {
+        if MIN_SUPPORTED_VERSION == 0 {
+            return; // version 0 is accepted; skip
+        }
+        let mut snapshot = ExportSnapshot::new(
+            SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
+                owner: "G".into(),
+                spending_percent: 5000,
+                savings_percent: 3000,
+                bills_percent: 1500,
+                insurance_percent: 500,
+            }),
+            ExportFormat::Json,
+        );
+        snapshot.header.version = 0;
+        assert!(
+            !snapshot.is_version_compatible(),
+            "snapshot with version 0 must fail is_version_compatible when MIN_SUPPORTED_VERSION > 0"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_for_import fires IncompatibleVersion before ChecksumMismatch
+    // (i.e. the version check is the first gate, not an afterthought).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_for_import_version_check_fires_before_checksum_check() {
+        let mut snapshot = ExportSnapshot::new(
+            SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
+                owner: "G".into(),
+                spending_percent: 5000,
+                savings_percent: 3000,
+                bills_percent: 1500,
+                insurance_percent: 500,
+            }),
+            ExportFormat::Json,
+        );
+        // Set a future version AND a wrong checksum — version check must fire first.
+        snapshot.header.version = SCHEMA_VERSION + 1;
+        snapshot.header.checksum = "wrong".into();
+
+        assert_eq!(
+            snapshot.validate_for_import(),
+            Err(MigrationError::IncompatibleVersion {
+                found: SCHEMA_VERSION + 1,
+                min: MIN_SUPPORTED_VERSION,
+                max: SCHEMA_VERSION,
+            }),
+            "IncompatibleVersion must be returned before ChecksumMismatch when both are wrong"
         );
     }
 }
