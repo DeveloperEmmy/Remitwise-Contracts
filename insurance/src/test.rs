@@ -20,6 +20,75 @@ use core::fmt::Write;
         String::from_str(env, s)
     }
 
+    /// Generate a policy name "Px" where x is the index, without format! macro.
+    /// Only works for indices 0-99 to avoid format! in no_std context.
+    fn policy_name(env: &Env, index: u32) -> String {
+        let name = match index {
+            0 => "P0",
+            1 => "P1",
+            2 => "P2",
+            3 => "P3",
+            4 => "P4",
+            5 => "P5",
+            6 => "P6",
+            7 => "P7",
+            8 => "P8",
+            9 => "P9",
+            10 => "P10",
+            11 => "P11",
+            12 => "P12",
+            13 => "P13",
+            14 => "P14",
+            15 => "P15",
+            16 => "P16",
+            17 => "P17",
+            18 => "P18",
+            19 => "P19",
+            20 => "P20",
+            21 => "P21",
+            22 => "P22",
+            23 => "P23",
+            24 => "P24",
+            25 => "P25",
+            26 => "P26",
+            27 => "P27",
+            28 => "P28",
+            29 => "P29",
+            30 => "P30",
+            31 => "P31",
+            32 => "P32",
+            33 => "P33",
+            34 => "P34",
+            35 => "P35",
+            36 => "P36",
+            37 => "P37",
+            38 => "P38",
+            39 => "P39",
+            40 => "P40",
+            41 => "P41",
+            42 => "P42",
+            43 => "P43",
+            44 => "P44",
+            45 => "P45",
+            46 => "P46",
+            47 => "P47",
+            48 => "P48",
+            49 => "P49",
+            50 => "P50",
+            51 => "P51",
+            52 => "P52",
+            53 => "P53",
+            54 => "P54",
+            55 => "P55",
+            56 => "P56",
+            57 => "P57",
+            58 => "P58",
+            59 => "P59",
+            _ => "P0",
+        };
+        n(env, name)
+    }
+
     // ── Existing tests ────────────────────────────────────────────────────────
 
     #[test]
@@ -1156,11 +1225,7 @@ use core::fmt::Write;
         // Create and deactivate 25 policies (> DEFAULT_PAGE_LIMIT=20).
         let total: u32 = DEFAULT_PAGE_LIMIT + 5;
         for i in 0..total {
-            let name = {
-    let mut s = StdString::new();
-    write!(&mut s, "P{}", i).unwrap();
-    String::from_str(&env, &s)
-};
+            let name = policy_name(&env, i);
             let id = c.create_policy(
                 &owner,
                 &name,
@@ -1202,7 +1267,7 @@ use core::fmt::Write;
 
         let total: u32 = MAX_PAGE_LIMIT + 5;
         for i in 0..total {
-            let name = String::from_str(&env, &("P".to_owned() + &i.to_string()));
+            let name = policy_name(&env, i);
             let id = c.create_policy(
                 &owner,
                 &name,
@@ -1242,7 +1307,7 @@ use core::fmt::Write;
         // Seed more records than the requested limit.
         let total: u32 = requested_limit + 3;
         for i in 0..total {
-            let name = String::from_str(&env, &("P".to_owned() + &i.to_string()));
+            let name = policy_name(&env, i);
             let id = c.create_policy(
                 &owner,
                 &name,

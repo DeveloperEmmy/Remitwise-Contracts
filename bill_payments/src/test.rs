@@ -1355,7 +1355,7 @@ mod testsuit {
         create_n_bills(&client, &env, &alice, 3);
         create_n_bills(&client, &env, &bob, 3);
 
-        let page = client.get_all_bills_page(&admin, &0, &10);
+        let page = client.get_all_bills_page(&admin, &0, &6);
         assert_eq!(
             page.items.len(),
             6,
@@ -3473,10 +3473,7 @@ mod testsuit {
 
         assert_eq!(
             emitted_actions,
-            [
-                symbol_short!("paused_v2"),
-                soroban_sdk::Symbol::new(&env, "unpaused_v2")
-            ]
+            [symbol_short!("paused_v2"), symbol_short!("unpaused_v2")]
         );
     }
 

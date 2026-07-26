@@ -654,6 +654,77 @@ mod settlement_currency_tests {
     use super::*;
     use soroban_sdk::{symbol_short, Env};
 
+    // --- Whitelisted paths: currency accepted by invoice whitelist ---
+
+    #[test]
+    fn accepts_currency_present_in_whitelist() {
+        let env = Env::default();
+        let whitelist =
+            soroban_sdk::Vec::from_array(&env, [symbol_short!("USDC"), symbol_short!("EURC")]);
+        assert_eq!(
+            require_matching_settlement_currency(&whitelist, &symbol_short!("USDC")),
+            Ok(())
+        );
+        assert_eq!(
+            require_matching_settlement_currency(&whitelist, &symbol_short!("EURC")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn accepts_sole_whitelisted_currency() {
+        let env = Env::default();
+        let whitelist = soroban_sdk::Vec::from_array(&env, [symbol_short!("XLM")]);
+        assert_eq!(
+            require_matching_settlement_currency(&whitelist, &symbol_short!("XLM")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn accepts_first_in_large_whitelist() {
+        let env = Env::default();
+        let mut whitelist = soroban_sdk::Vec::new(&env);
+        whitelist.push_back(symbol_short!("USDC"));
+        whitelist.push_back(symbol_short!("EURC"));
+        whitelist.push_back(symbol_short!("USDT"));
+        whitelist.push_back(symbol_short!("EURS"));
+        assert_eq!(
+            require_matching_settlement_currency(&whitelist, &symbol_short!("USDC")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn accepts_last_in_large_whitelist() {
+        let env = Env::default();
+        let mut whitelist = soroban_sdk::Vec::new(&env);
+        whitelist.push_back(symbol_short!("USDC"));
+        whitelist.push_back(symbol_short!("EURC"));
+        whitelist.push_back(symbol_short!("USDT"));
+        whitelist.push_back(symbol_short!("EURS"));
+        assert_eq!(
+            require_matching_settlement_currency(&whitelist, &symbol_short!("EURS")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn accepts_middle_in_large_whitelist() {
+        let env = Env::default();
+        let mut whitelist = soroban_sdk::Vec::new(&env);
+        whitelist.push_back(symbol_short!("USDC"));
+        whitelist.push_back(symbol_short!("EURC"));
+        whitelist.push_back(symbol_short!("USDT"));
+        whitelist.push_back(symbol_short!("EURS"));
+        assert_eq!(
+            require_matching_settlement_currency(&whitelist, &symbol_short!("USDT")),
+            Ok(())
+        );
+    }
+
+    // --- Non-whitelisted paths: currency rejected (not in whitelist) ---
+
     #[test]
     fn rejects_currency_not_in_whitelist() {
         let env = Env::default();
@@ -678,27 +749,47 @@ mod settlement_currency_tests {
     }
 
     #[test]
-    fn accepts_currency_present_in_whitelist() {
+    fn rejects_empty_symbol_against_populated_whitelist() {
         let env = Env::default();
         let whitelist =
             soroban_sdk::Vec::from_array(&env, [symbol_short!("USDC"), symbol_short!("EURC")]);
         assert_eq!(
-            require_matching_settlement_currency(&whitelist, &symbol_short!("USDC")),
-            Ok(())
-        );
-        assert_eq!(
-            require_matching_settlement_currency(&whitelist, &symbol_short!("EURC")),
-            Ok(())
+            require_matching_settlement_currency(&whitelist, &Symbol::new(&env, "")),
+            Err(SettlementCurrencyError::CurrencyNotWhitelisted)
         );
     }
 
     #[test]
-    fn accepts_sole_whitelisted_currency() {
+    fn rejects_rebase_token_not_whitelisted() {
         let env = Env::default();
-        let whitelist = soroban_sdk::Vec::from_array(&env, [symbol_short!("XLM")]);
+        let whitelist =
+            soroban_sdk::Vec::from_array(&env, [symbol_short!("USDC"), symbol_short!("EURC")]);
+        assert_eq!(
+            require_matching_settlement_currency(&whitelist, &symbol_short!("AMPL")),
+            Err(SettlementCurrencyError::CurrencyNotWhitelisted)
+        );
+    }
+
+    #[test]
+    fn rejects_all_non_whitelisted_in_large_list() {
+        let env = Env::default();
+        let whitelist = soroban_sdk::Vec::from_array(&env, [
+            symbol_short!("USDC"),
+            symbol_short!("EURC"),
+            symbol_short!("USDT"),
+        ]);
+        // Test rejection of various non-whitelisted currencies
         assert_eq!(
             require_matching_settlement_currency(&whitelist, &symbol_short!("XLM")),
-            Ok(())
+            Err(SettlementCurrencyError::CurrencyNotWhitelisted)
+        );
+        assert_eq!(
+            require_matching_settlement_currency(&whitelist, &symbol_short!("EURS")),
+            Err(SettlementCurrencyError::CurrencyNotWhitelisted)
+        );
+        assert_eq!(
+            require_matching_settlement_currency(&whitelist, &symbol_short!("BUSD")),
+            Err(SettlementCurrencyError::CurrencyNotWhitelisted)
         );
     }
 
@@ -1064,6 +1155,13 @@ pub const BPS_PER_PERCENT: u32 = 100;
 /// Alias for [`BPS_PER_PERCENT`]: 100 basis points = 1%.
 pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
 
+/// Basis points per percent (100 basis points = 1%)
+/// Used for converting whole percentages to basis points.
+pub const BPS_PER_PERCENT: u32 = 100;
+
+/// Alias for `BPS_PER_PERCENT` for clarity in some contexts.
+pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
+
 /// Supported units for externally supplied rate inputs.
 ///
 /// Remitwise contracts currently accept only basis points. Treating a raw rate
@@ -1071,6 +1169,7 @@ pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
 /// have the contract silently interpret it as basis points, potentially
 /// magnifying or shrinking fee/discount/allocation calculations. This guard
 /// makes the accepted unit explicit and reject-by-default.
+
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -1232,21 +1331,31 @@ impl Rate {
         Ok(Self::from_bps(value))
     }
 
-    /// Create a `Rate` from a whole percentage value, checking for overflow.
+    /// Convert a whole percentage value to a [`Rate`] in basis points.
     ///
-    /// Returns `Ok(Rate)` if `percent * 100` fits in `u32`, or `Err(RateError::Overflow)`.
+    /// Multiplies the input percentage by 100 to get basis points.
+    /// Returns `Err(RateError::Overflow)` if the multiplication overflows.
+    ///
+    /// # Examples
+    /// ```ignore
+    /// assert_eq!(Rate::from_percent(0), Ok(Rate::from_bps(0)));
+    /// assert_eq!(Rate::from_percent(5), Ok(Rate::from_bps(500)));
+    /// assert_eq!(Rate::from_percent(100), Ok(Rate::from_bps(10_000)));
+    /// ```
     #[inline(always)]
     pub fn from_percent(percent: u32) -> Result<Self, RateError> {
         percent
             .checked_mul(BPS_PER_PERCENT)
-            .map(Self)
+            .map(Self::from_bps)
             .ok_or(RateError::Overflow)
     }
 
-    /// Create a `Rate` from a [`Percent`] newtype.
+    /// Convert a [`Percent`] type to a [`Rate`].
+    ///
+    /// This is a convenience wrapper around `Percent::to_rate()`.
     #[inline(always)]
     pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
-        Self::from_percent(percent.to_percentage())
+        percent.to_rate()
     }
 
     /// Return the raw basis-point value.
@@ -2615,6 +2724,8 @@ mod stable_currency_tests {
     use super::{require_stable_currency, StableCurrencyError};
     use soroban_sdk::{Env, Symbol};
 
+    // --- Whitelisted paths: currency accepted by stable currency allowlist ---
+
     #[test]
     fn accepts_usdc() {
         let env = Env::default();
@@ -2707,6 +2818,23 @@ mod stable_currency_tests {
     }
 
     #[test]
+    fn accepts_all_case_variants_of_usdt() {
+        let env = Env::default();
+        // Test all four possible case combinations for a 4-letter symbol
+        let sym_upper = Symbol::new(&env, "USDT");
+        let sym_lower = Symbol::new(&env, "usdt");
+        let sym_mixed1 = Symbol::new(&env, "UsDt");
+        let sym_mixed2 = Symbol::new(&env, "usdT");
+
+        assert_eq!(require_stable_currency(&env, &sym_upper), Ok(()));
+        assert_eq!(require_stable_currency(&env, &sym_lower), Ok(()));
+        assert_eq!(require_stable_currency(&env, &sym_mixed1), Ok(()));
+        assert_eq!(require_stable_currency(&env, &sym_mixed2), Ok(()));
+    }
+
+    // --- Non-whitelisted paths: currency rejected (not in stable allowlist) ---
+
+    #[test]
     fn rejects_rebase_token_ampl() {
         let env = Env::default();
         let sym = Symbol::new(&env, "AMPL");
@@ -2757,28 +2885,97 @@ mod stable_currency_tests {
     }
 
     #[test]
-    fn require_supported_currency_accepts_usdc() {
+    fn rejects_generic_erc20_token() {
         let env = Env::default();
-        let sym = Symbol::new(&env, "USDC");
-        assert_eq!(super::require_supported_currency(&env, &sym), Ok(()));
-    }
-
-    #[test]
-    fn require_supported_currency_rejects_rebase_token() {
-        let env = Env::default();
-        let sym = Symbol::new(&env, "AMPL");
+        let sym = Symbol::new(&env, "GTOKEN");
         assert_eq!(
-            super::require_supported_currency(&env, &sym),
+            require_stable_currency(&env, &sym),
             Err(StableCurrencyError::UnsupportedCurrency)
         );
     }
 
     #[test]
-    fn require_supported_currency_rejects_unknown_token() {
+    fn rejects_volatile_token_luna() {
         let env = Env::default();
-        let sym = Symbol::new(&env, "RANDOM");
+        let sym = Symbol::new(&env, "LUNA");
         assert_eq!(
-            super::require_supported_currency(&env, &sym),
+            require_stable_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    #[test]
+    fn rejects_volatile_token_sol() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "SOL");
+        assert_eq!(
+            require_stable_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    #[test]
+    fn rejects_volatile_token_eth() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "ETH");
+        assert_eq!(
+            require_stable_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    #[test]
+    fn rejects_volatile_token_btc() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "BTC");
+        assert_eq!(
+            require_stable_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    #[test]
+    fn rejects_rebase_tokens_case_insensitive() {
+        let env = Env::default();
+        // Verify that rebase token rejection is case-insensitive (consistent with acceptance)
+        let sym_lower = Symbol::new(&env, "ampl");
+        let sym_mixed = Symbol::new(&env, "AmPl");
+        assert_eq!(
+            require_stable_currency(&env, &sym_lower),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+        assert_eq!(
+            require_stable_currency(&env, &sym_mixed),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    #[test]
+    fn rejects_very_long_unknown_symbol() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "VERYLONGTOKEN");
+        assert_eq!(
+            require_stable_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    #[test]
+    fn rejects_numeric_only_token() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "123");
+        assert_eq!(
+            require_stable_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    #[test]
+    fn rejects_special_char_token() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "US$D");
+        assert_eq!(
+            require_stable_currency(&env, &sym),
             Err(StableCurrencyError::UnsupportedCurrency)
         );
     }
