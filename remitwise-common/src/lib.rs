@@ -1547,6 +1547,13 @@ pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
 /// Basis points per percent: 100 bps = 1%.
 pub const BPS_PER_PERCENT: u32 = 100;
 
+/// Whole-per-cent to basis-points conversion factor: 1 percent = 100 bps.
+pub const BPS_PER_PERCENT: u32 = 100;
+
+/// Alias for [`BPS_PER_PERCENT`]; kept for documentation symmetry with
+/// [`BASIS_POINTS`]. Both constants equal 100.
+pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
+
 /// Supported units for externally supplied rate inputs.
 ///
 /// Remitwise contracts currently accept only basis points. Treating a raw rate
@@ -1771,6 +1778,27 @@ impl Rate {
             .checked_mul(rate_i128)
             .and_then(|product| product.checked_div(BASIS_POINTS as i128))
             .ok_or(RateError::Overflow)
+    }
+
+    /// Create a `Rate` from a whole percentage integer value.
+    ///
+    /// Returns `Ok(Rate)` if `percent * 100` fits in `u32`, or
+    /// `Err(RateError::Overflow)` otherwise.
+    #[inline(always)]
+    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
+        percent
+            .checked_mul(BPS_PER_PERCENT)
+            .map(Self)
+            .ok_or(RateError::Overflow)
+    }
+
+    /// Create a `Rate` from a [`Percent`] type.
+    ///
+    /// Returns `Ok(Rate)` if the percentage value fits in `u32` basis
+    /// points, or `Err(RateError::Overflow)` otherwise.
+    #[inline(always)]
+    pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
+        percent.to_rate()
     }
 }
 
@@ -2919,6 +2947,97 @@ pub fn require_active_pause_channel(env: &Env, channel: Symbol) {
     if paused {
         panic!("Pause channel is inactive");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Investigation epoch — halt writes during security investigations
+// ---------------------------------------------------------------------------
+
+pub(crate) const STORAGE_INVESTIGATION_EPOCH: Symbol = symbol_short!("INVEST_EPOCH");
+
+/// Error returned when a write operation is blocked because an
+/// investigation epoch is active.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum InvestigationEpochError {
+    /// A write was blocked because an investigation epoch is in effect
+    /// and no further state mutations are allowed.
+    WriteBlocked = 1,
+}
+
+/// Returns `true` if the current ledger timestamp is before the stored
+/// investigation epoch end timestamp, meaning an investigation epoch is
+/// active and writes must be halted.
+pub fn is_investigation_epoch_active(env: &Env) -> bool {
+    let epoch_end: u64 = env
+        .storage()
+        .instance()
+        .get(&STORAGE_INVESTIGATION_EPOCH)
+        .unwrap_or(0);
+    epoch_end > env.ledger().timestamp()
+}
+
+/// Halts write operations if an investigation epoch is active.
+///
+/// Call this at the top of every write entry point (bill payment, premium
+/// payment, remittance disbursement, etc.) as a defence-in-depth guard.
+/// When an investigation epoch is active the contract rejects any mutation
+/// with [`InvestigationEpochError::WriteBlocked`].
+///
+/// # Threat model
+/// Without this check, an attacker who has discovered a vulnerability can
+/// continue to exploit it during an active investigation — stealing remaining
+/// funds, corrupting state that would otherwise be preserved for forensic
+/// analysis, or escalating the attack by triggering additional write-side
+/// effects. Freezing writes limits the blast radius and preserves evidence
+/// for the investigation team.
+///
+/// # Cost
+/// One instance storage read plus one `u64` comparison. Negligible
+/// relative to any write entry point's existing storage reads/writes.
+///
+/// # Errors
+/// Returns [`InvestigationEpochError::WriteBlocked`] when the investigation
+/// epoch is active.
+pub fn require_no_investigation_epoch(env: &Env) -> Result<(), InvestigationEpochError> {
+    if is_investigation_epoch_active(env) {
+        Err(InvestigationEpochError::WriteBlocked)
+    } else {
+        Ok(())
+    }
+}
+
+/// Start an investigation epoch for the given duration in seconds.
+///
+/// The epoch is a time-bounded window during which all write operations
+/// are blocked. After `duration_secs` elapses the epoch expires
+/// automatically (no manual intervention required).
+///
+/// # Security
+/// This function does not enforce authentication — it is the caller's
+/// responsibility to gate it with admin auth (e.g.
+/// `admin.require_auth()` in the calling contract).
+pub fn start_investigation_epoch(env: &Env, duration_secs: u64) {
+    let end_time = env
+        .ledger()
+        .timestamp()
+        .saturating_add(duration_secs);
+    env.storage()
+        .instance()
+        .set(&STORAGE_INVESTIGATION_EPOCH, &end_time);
+}
+
+/// Clear the investigation epoch immediately, allowing writes to proceed
+/// again.
+///
+/// If no investigation epoch is active, this is a no-op.
+///
+/// # Security
+/// This function does not enforce authentication — it is the caller's
+/// responsibility to gate it with admin auth.
+pub fn clear_investigation_epoch(env: &Env) {
+    env.storage().instance().remove(&STORAGE_INVESTIGATION_EPOCH);
 }
 
 // ---------------------------------------------------------------------------
