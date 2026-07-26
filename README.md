@@ -358,6 +358,8 @@ To run an example, use `cargo run --example <example_name>`:
 - [Security Review Summary](SECURITY_REVIEW_SUMMARY.md)
 - [Event Versioning ADR](docs/events-versioning.md) - Why contract events are versioned via a `_v2` suffix
 - [Event Versioning Discipline](docs/EVENT_VERSIONING.md) - Backward-compatibility rules, migration steps, and indexer guidelines for event schema changes
+- [Cross-Contract Epochs](docs/CROSS_CONTRACT_EPOCHS.md) - Actor-epoch semantics, the cross-contract coordination protocol, and the `EpochMismatch` guard
+- [Observability Model](docs/OBSERVABILITY_MODEL.md) - Per-contract event catalogue: what each contract emits and what off-chain consumers rely on
 
 ## Contracts
 
