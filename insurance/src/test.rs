@@ -1152,7 +1152,7 @@ mod tests {
         // Create and deactivate 25 policies (> DEFAULT_PAGE_LIMIT=20).
         let total: u32 = DEFAULT_PAGE_LIMIT + 5;
         for i in 0..total {
-            let name = String::from_str(&env, &format!("P{}", i));
+            let name = n(&env, &format!("P{}", i));
             let id = c.create_policy(
                 &owner,
                 &name,
@@ -1194,7 +1194,7 @@ mod tests {
 
         let total: u32 = MAX_PAGE_LIMIT + 5;
         for i in 0..total {
-            let name = String::from_str(&env, &format!("P{}", i));
+            let name = n(&env, &format!("P{}", i));
             let id = c.create_policy(
                 &owner,
                 &name,
@@ -1234,7 +1234,7 @@ mod tests {
         // Seed more records than the requested limit.
         let total: u32 = requested_limit + 3;
         for i in 0..total {
-            let name = String::from_str(&env, &format!("P{}", i));
+            let name = n(&env, &format!("P{}", i));
             let id = c.create_policy(
                 &owner,
                 &name,
