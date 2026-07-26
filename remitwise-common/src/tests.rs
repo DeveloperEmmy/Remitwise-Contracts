@@ -22,8 +22,7 @@ use crate::distribute_pro_rata;
 use ed25519_dalek::Signer;
 use proptest::prelude::*;
 use soroban_sdk::testutils::{Ledger, LedgerInfo};
-use soroban_sdk::{Env, String, Symbol, Vec};
-use std::string::ToString;
+use soroban_sdk::{contract, contractimpl, Bytes, Env, IntoVal, String, Symbol, Vec};
 
 #[allow(dead_code)]
 fn set_ledger(env: &Env, sequence_number: u32) {
@@ -33,6 +32,24 @@ fn set_ledger(env: &Env, sequence_number: u32) {
         sequence_number,
         timestamp: 1_700_000_000,
         network_id: [0; 32],
+        base_reserve: 10,
+        min_temp_entry_ttl: 1,
+        min_persistent_entry_ttl: 1,
+        max_entry_ttl: 3_000_000,
+    });
+}
+
+/// Sets only `network_id` on the ledger, preserving the rest of its current
+/// state. Used to simulate the same contract instance storage being read
+/// under a different Stellar network.
+fn set_network(env: &Env, network_id: [u8; 32]) {
+    let proto = env.ledger().protocol_version();
+    let sequence_number = env.ledger().sequence();
+    env.ledger().set(LedgerInfo {
+        protocol_version: proto,
+        sequence_number,
+        timestamp: 1_700_000_000,
+        network_id,
         base_reserve: 10,
         min_temp_entry_ttl: 1,
         min_persistent_entry_ttl: 1,
@@ -908,9 +925,21 @@ proptest! {
 
 // ─── verify_signature tests ──────────────────────────────────────────────────
 
+// `register_verifier`/`require_registered_verifier` read and write instance
+// storage, which the Soroban host only allows inside a contract's execution
+// context. Tests exercising them run their storage-touching calls inside
+// `env.as_contract(&contract_id, || { .. })` against this no-op contract,
+// mirroring the pattern already used in `orchestrator/src/test.rs`.
+#[contract]
+struct VerifierTestContract;
+
+#[contractimpl]
+impl VerifierTestContract {}
+
 #[test]
 fn test_verify_signature_valid() {
     let env = Env::default();
+    let contract_id = env.register_contract(None, VerifierTestContract);
     let domain = b"test-domain";
     let message = b"hello world";
 
@@ -920,15 +949,18 @@ fn test_verify_signature_valid() {
     let prefixed = prefixed_message(domain, message);
     let signature = sk.sign(&prefixed).to_bytes();
 
-    register_verifier(&env, &pk).unwrap();
+    env.as_contract(&contract_id, || {
+        register_verifier(&env, &pk).unwrap();
 
-    let result = verify_signature(&env, domain, message, &signature, &pk);
-    assert_eq!(result, Ok(()));
+        let result = verify_signature(&env, domain, message, &signature, &pk);
+        assert_eq!(result, Ok(()));
+    });
 }
 
 #[test]
 fn test_verify_signature_rejects_unregistered_verifier() {
     let env = Env::default();
+    let contract_id = env.register_contract(None, VerifierTestContract);
     let domain = b"test-domain";
     let message = b"hello world";
 
@@ -939,14 +971,17 @@ fn test_verify_signature_rejects_unregistered_verifier() {
     prefixed.extend_from_slice(message);
     let signature = sk.sign(&prefixed).to_bytes();
 
-    let result = verify_signature(&env, domain, message, &signature, &pk);
-    assert_eq!(result, Err(SignatureError::UnregisteredVerifier));
+    env.as_contract(&contract_id, || {
+        let result = verify_signature(&env, domain, message, &signature, &pk);
+        assert_eq!(result, Err(SignatureError::UnregisteredVerifier));
+    });
 }
 
 #[test]
 #[should_panic]
 fn test_verify_signature_invalid_signature() {
     let env = Env::default();
+    let contract_id = env.register_contract(None, VerifierTestContract);
     let domain = b"test-domain";
     let message = b"hello world";
 
@@ -954,14 +989,17 @@ fn test_verify_signature_invalid_signature() {
     let pk = sk.verifying_key().to_bytes();
     let invalid_signature = [0u8; 64];
 
-    register_verifier(&env, &pk).unwrap();
+    env.as_contract(&contract_id, || {
+        register_verifier(&env, &pk).unwrap();
 
-    let _ = verify_signature(&env, domain, message, &invalid_signature, &pk);
+        let _ = verify_signature(&env, domain, message, &invalid_signature, &pk);
+    });
 }
 
 #[test]
 fn test_verify_signature_invalid_signature_length() {
     let env = Env::default();
+    let contract_id = env.register_contract(None, VerifierTestContract);
     let domain = b"test-domain";
     let message = b"hello world";
 
@@ -969,10 +1007,12 @@ fn test_verify_signature_invalid_signature_length() {
     let pk = sk.verifying_key().to_bytes();
     let short_signature = [0u8; 32];
 
-    register_verifier(&env, &pk).unwrap();
+    env.as_contract(&contract_id, || {
+        register_verifier(&env, &pk).unwrap();
 
-    let result = verify_signature(&env, domain, message, &short_signature, &pk);
-    assert_eq!(result, Err(SignatureError::InvalidSignatureLength));
+        let result = verify_signature(&env, domain, message, &short_signature, &pk);
+        assert_eq!(result, Err(SignatureError::InvalidSignatureLength));
+    });
 }
 
 #[test]
@@ -984,6 +1024,8 @@ fn test_verify_signature_invalid_public_key_length() {
     let short_pk = [0u8; 16];
     let signature = [0u8; 64];
 
+    // Invalid key length is rejected before any storage access, so this
+    // does not need a contract context.
     let result = verify_signature(&env, domain, message, &signature, &short_pk);
     assert_eq!(result, Err(SignatureError::InvalidPublicKeyLength));
 }
@@ -992,6 +1034,7 @@ fn test_verify_signature_invalid_public_key_length() {
 #[should_panic]
 fn test_verify_signature_wrong_domain() {
     let env = Env::default();
+    let contract_id = env.register_contract(None, VerifierTestContract);
     let domain1 = b"domain1";
     let domain2 = b"domain2";
     let message = b"hello world";
@@ -1002,9 +1045,57 @@ fn test_verify_signature_wrong_domain() {
     let prefixed = prefixed_message(domain1, message);
     let signature = sk.sign(&prefixed).to_bytes();
 
-    register_verifier(&env, &pk).unwrap();
+    env.as_contract(&contract_id, || {
+        register_verifier(&env, &pk).unwrap();
 
-    let _ = verify_signature(&env, domain2, message, &signature, &pk);
+        let _ = verify_signature(&env, domain2, message, &signature, &pk);
+    });
+}
+
+/// Regression test for the "test signer on prod" gap: a verifier public key
+/// registered while the contract instance observed one network (e.g. Testnet)
+/// must NOT be accepted once the same storage is read under a different
+/// network (e.g. Public/Mainnet), even though the key itself is unchanged.
+///
+/// This simulates a verifier registry entry that ended up on the wrong
+/// deployment (e.g. via a copy-pasted `REMITWISE_ACTIVE_VERIFIERS` config, or
+/// a snapshot import) by registering under one `network_id` and then mutating
+/// the ledger's `network_id` before verifying, all against the same
+/// underlying instance storage.
+///
+/// Before the fix: `require_registered_verifier` only tracked `bool`
+/// membership, so this passed regardless of network. This test fails against
+/// that behavior and passes once registration is bound to `network_id`.
+#[test]
+fn test_verify_signature_rejects_verifier_from_different_network() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, VerifierTestContract);
+    let domain = b"test-domain";
+    let message = b"hello world";
+
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key().to_bytes();
+
+    let mut prefixed = std::vec::Vec::new();
+    prefixed.extend_from_slice(domain);
+    prefixed.extend_from_slice(message);
+    let signature = sk.sign(&prefixed).to_bytes();
+
+    env.as_contract(&contract_id, || {
+        // Register the verifier while the contract instance observes "testnet".
+        set_network(&env, [7u8; 32]);
+        register_verifier(&env, &pk).unwrap();
+
+        // Same storage, but the instance is now running on a different
+        // network ("mainnet") — the registration above must no longer be
+        // honored.
+        set_network(&env, [9u8; 32]);
+        let result = require_registered_verifier(&env, &pk);
+        assert_eq!(result, Err(SignatureError::VerifierNetworkMismatch));
+
+        let result = verify_signature(&env, domain, message, &signature, &pk);
+        assert_eq!(result, Err(SignatureError::VerifierNetworkMismatch));
+    });
 }
 
 /// Sign for domain A, replay against domain B — must fail.
@@ -1051,6 +1142,7 @@ fn test_verify_signature_rejects_adjacent_domain_message_collision() {
 #[test]
 fn test_verify_slash_signature_valid() {
     let env = Env::default();
+    let contract_id = env.register_contract(None, VerifierTestContract);
     let message = b"slash payload";
 
     let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
@@ -1061,11 +1153,13 @@ fn test_verify_slash_signature_valid() {
     prefixed.extend_from_slice(message);
     let signature = sk.sign(&prefixed).to_bytes();
 
-    register_verifier(&env, &pk).unwrap();
+    env.as_contract(&contract_id, || {
+        register_verifier(&env, &pk).unwrap();
 
-    // Verify the slash signature
-    let result = verify_slash_signature(&env, message, Some(&signature), &pk);
-    assert_eq!(result, Ok(()));
+        // Verify the slash signature
+        let result = verify_slash_signature(&env, message, Some(&signature), &pk);
+        assert_eq!(result, Ok(()));
+    });
 }
 
 #[test]
@@ -1074,7 +1168,8 @@ fn test_verify_slash_signature_optional_none() {
     let message = b"slash payload";
     let pk = [0u8; 32];
 
-    // Verify when signature is None (should succeed as it's optional)
+    // Optional-signature short-circuit never touches storage, so this does
+    // not need a contract context.
     let result = verify_slash_signature(&env, message, None, &pk);
     assert_eq!(result, Ok(()));
 }
@@ -1083,16 +1178,20 @@ fn test_verify_slash_signature_optional_none() {
 #[should_panic]
 fn test_verify_slash_signature_invalid() {
     let env = Env::default();
+    let contract_id = env.register_contract(None, VerifierTestContract);
     let message = b"slash payload";
 
     let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
     let pk = sk.verifying_key().to_bytes();
     let invalid_signature = [0u8; 64]; // Invalid
 
-    register_verifier(&env, &pk).unwrap();
+    env.as_contract(&contract_id, || {
+        register_verifier(&env, &pk).unwrap();
 
-    // Verify the invalid slash signature
-    let _ = verify_slash_signature(&env, message, Some(&invalid_signature), &pk);
+        // Verify the invalid slash signature
+        let result = verify_slash_signature(&env, message, Some(&invalid_signature), &pk);
+        assert_eq!(result, Err(SlashError::InvalidSignature));
+    });
 }
 
 // ─── distribute_pro_rata tests (#1085) ───────────────────────────────────────
