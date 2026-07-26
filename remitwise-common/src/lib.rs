@@ -206,6 +206,36 @@ pub fn guard_bytes_len(bytes: &Bytes) -> Result<(), BytesReturnError> {
 }
 
 // ---------------------------------------------------------------------------
+// BytesN validation
+// ---------------------------------------------------------------------------
+
+/// Error returned when a `BytesN` value is completely zeroed.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum BytesNError {
+    /// The `BytesN` array consists entirely of zero bytes.
+    AllZeros = 1,
+}
+
+/// Guards that a `BytesN` array is not completely zeroed.
+///
+/// This is a defence-in-depth check. Cryptographic identifiers like public keys
+/// or signatures should never legitimately be all-zeros. If they are, it usually
+/// points to a zero-initialised buffer bug or an attacker intentionally passing
+/// `[0; N]` to exploit uninitialized or default state in a verifier.
+///
+/// # Errors
+/// Returns [`BytesNError::AllZeros`] when `bytes` consists entirely of zero bytes.
+pub fn require_non_zero_bytes<const N: usize>(bytes: &BytesN<N>) -> Result<(), BytesNError> {
+    if bytes.to_array().iter().all(|&b| b == 0) {
+        Err(BytesNError::AllZeros)
+    } else {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Settlement amount validation
 // ---------------------------------------------------------------------------
 

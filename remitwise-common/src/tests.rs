@@ -1335,3 +1335,21 @@ proptest! {
         prop_assert_eq!(p.to_bps(), Ok(pct * 100));
     }
 }
+
+#[test]
+fn test_require_non_zero_bytes() {
+    let env = Env::default();
+    
+    // Valid cases
+    let valid_bytes = soroban_sdk::BytesN::from_array(&env, &[1; 32]);
+    assert_eq!(require_non_zero_bytes(&valid_bytes), Ok(()));
+    
+    let mut mixed = [0; 32];
+    mixed[31] = 1;
+    let mixed_bytes = soroban_sdk::BytesN::from_array(&env, &mixed);
+    assert_eq!(require_non_zero_bytes(&mixed_bytes), Ok(()));
+
+    // Invalid case: all zeros
+    let zero_bytes = soroban_sdk::BytesN::from_array(&env, &[0; 32]);
+    assert_eq!(require_non_zero_bytes(&zero_bytes), Err(BytesNError::AllZeros));
+}
