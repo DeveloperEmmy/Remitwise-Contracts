@@ -1204,6 +1204,12 @@ pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
 /// Alias for `BASIS_POINTS_PER_PERCENT` for brevity in arithmetic.
 pub const BPS_PER_PERCENT: u32 = BASIS_POINTS_PER_PERCENT;
 
+/// Basis points per whole percentage point: 100 basis points = 1%.
+pub const BPS_PER_PERCENT: u32 = 100;
+
+/// Alias for BPS_PER_PERCENT for readability across crates.
+pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
+
 /// Supported units for externally supplied rate inputs.
 ///
 /// Remitwise contracts currently accept only basis points. Treating a raw rate
@@ -1345,9 +1351,9 @@ impl Rate {
         Self(bps)
     }
 
-    /// Create a `Rate` from a whole percentage integer.
-    /// Returns `Err(RateError::Overflow)` if `percent * BPS_PER_PERCENT` exceeds `u32::MAX`.
-    #[inline(always)]
+    /// Create a `Rate` from a whole percentage value.
+    ///
+    /// Returns `Ok(Rate)` if `percent * 100` fits in `u32`, or `Err(RateError::Overflow)` otherwise.
     pub fn from_percent(percent: u32) -> Result<Self, RateError> {
         percent
             .checked_mul(BPS_PER_PERCENT)
@@ -1355,7 +1361,7 @@ impl Rate {
             .ok_or(RateError::Overflow)
     }
 
-    /// Create a `Rate` from a strongly-typed [`Percent`].
+    /// Create a `Rate` from a typed [`Percent`] value.
     #[inline(always)]
     pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
         Self::from_percent(percent.to_percentage())
