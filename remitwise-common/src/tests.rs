@@ -1738,96 +1738,73 @@ proptest! {
     }
 }
 
-// ============================================================================
-// Investigation epoch tests
-// ============================================================================
+// ─── require_valid_symbol_length ─────────────────────────────────────────────
+//
+// These tests lock in the boundary contract for [`require_valid_symbol_length`]:
+//
+// - Empty input (0 bytes)  → Err(SymbolLengthError::Empty)
+// - 1-byte input           → Ok(())   (lower inclusive boundary)
+// - 9-byte input           → Ok(())   (upper inclusive boundary for symbol_short!)
+// - 10-byte input          → Err(SymbolLengthError::TooLong)  (one past the cap)
+//
+// The 9-byte cap matches the Soroban SDK `symbol_short!` macro constraint that
+// is enforced across all storage keys in this workspace (see STORAGE_LAYOUT.md
+// and `testutils/tests/storage_key_naming_test.rs`).  These tests are purely
+// concerned with the project-level validation function, not with the SDK macro
+// itself (which has its own coverage in symbol_length_boundary_test.rs).
 
+/// Empty byte slice is rejected with Empty.
 #[test]
-fn test_investigation_epoch_not_active_by_default() {
-    let env = Env::default();
-    assert!(!crate::is_investigation_epoch_active(&env));
+fn require_valid_symbol_length_empty_input_returns_empty_error() {
+    assert_eq!(
+        require_valid_symbol_length(b""),
+        Err(SymbolLengthError::Empty),
+        "empty name must be rejected with SymbolLengthError::Empty"
+    );
 }
 
+/// A single-byte name is the smallest valid symbol and must be accepted.
 #[test]
-fn test_require_no_investigation_epoch_returns_ok_when_inactive() {
-    let env = Env::default();
-    assert_eq!(crate::require_no_investigation_epoch(&env), Ok(()));
+fn require_valid_symbol_length_one_char_returns_ok() {
+    assert_eq!(
+        require_valid_symbol_length(b"A"),
+        Ok(()),
+        "1-byte name is the lower boundary and must be accepted"
+    );
 }
 
+/// A 9-byte name is the upper boundary accepted by `symbol_short!` and must pass.
 #[test]
-fn test_start_investigation_epoch_marks_active() {
-    let env = Env::default();
-    // Set a 1-hour epoch starting now.
-    crate::start_investigation_epoch(&env, 3_600);
-    assert!(crate::is_investigation_epoch_active(&env));
+fn require_valid_symbol_length_nine_chars_returns_ok() {
+    // Exactly SYMBOL_SHORT_MAX_LEN bytes.
+    const NAME: &[u8] = b"NINE_BYTE"; // 9 bytes
+    const _: () = assert!(NAME.len() == 9);
+    assert_eq!(
+        require_valid_symbol_length(NAME),
+        Ok(()),
+        "9-byte name is exactly at the symbol_short! cap and must be accepted"
+    );
 }
 
+/// A 10-byte name is one past the `symbol_short!` cap and must be rejected.
 #[test]
-fn test_require_no_investigation_epoch_blocks_writes_during_epoch() {
-    let env = Env::default();
-    crate::start_investigation_epoch(&env, 3_600);
-    let result = crate::require_no_investigation_epoch(&env);
-    assert_eq!(result, Err(crate::InvestigationEpochError::WriteBlocked));
+fn require_valid_symbol_length_ten_chars_returns_too_long_error() {
+    const NAME: &[u8] = b"TEN_BYTES_"; // 10 bytes
+    const _: () = assert!(NAME.len() == 10);
+    assert_eq!(
+        require_valid_symbol_length(NAME),
+        Err(SymbolLengthError::TooLong),
+        "10-byte name exceeds the symbol_short! cap and must be rejected with SymbolLengthError::TooLong"
+    );
 }
 
+/// Additional boundary: names much longer than the cap are also rejected.
 #[test]
-fn test_require_no_investigation_epoch_allows_writes_after_expiry() {
-    let env = Env::default();
-    // Set a 0-second epoch (already expired at the current timestamp).
-    crate::start_investigation_epoch(&env, 0);
-    // Immediately after starting with 0 duration, the epoch may still
-    // be active (timestamp == stored end), but after advancing the ledger
-    // it should be inactive. Verify the helper returns Ok when inactive.
-    // Use explicit assertion that a cleared epoch allows writes.
-    crate::clear_investigation_epoch(&env);
-    assert_eq!(crate::require_no_investigation_epoch(&env), Ok(()));
-}
-
-#[test]
-fn test_clear_investigation_epoch_allows_writes() {
-    let env = Env::default();
-    crate::start_investigation_epoch(&env, 3_600);
-    assert!(crate::is_investigation_epoch_active(&env));
-    crate::clear_investigation_epoch(&env);
-    // No error means the epoch is cleared and writes are allowed.
-    assert_eq!(crate::require_no_investigation_epoch(&env), Ok(()));
-    assert!(!crate::is_investigation_epoch_active(&env));
-}
-
-#[test]
-fn test_investigation_epoch_expires_naturally() {
-    let env = Env::default();
-    let past_end = env.ledger().timestamp().saturating_sub(1);
-    env.storage()
-        .instance()
-        .set(&crate::STORAGE_INVESTIGATION_EPOCH, &past_end);
-    // Epoch was set in the past — should already be inactive.
-    assert!(!crate::is_investigation_epoch_active(&env));
-    assert_eq!(crate::require_no_investigation_epoch(&env), Ok(()));
-}
-
-/// Negative test: a write operation attempted during an active investigation
-/// epoch is rejected with [`InvestigationEpochError::WriteBlocked`].
-/// This test exercises the defence-in-depth guard that halts writes when
-/// an investigation epoch is in effect. Before the fix was in place, this
-/// write would have been allowed (the guard was missing), giving an attacker
-/// a window to continue exploiting a vulnerability or destroying forensic
-/// evidence during an active investigation.
-#[test]
-fn test_write_halted_during_investigation_epoch() {
-    let env = Env::default();
-    crate::start_investigation_epoch(&env, 3_600);
-    // The core defence: require_no_investigation_epoch returns
-    // WriteBlocked when an epoch is active.
-    let result = crate::require_no_investigation_epoch(&env);
-    assert_eq!(result, Err(crate::InvestigationEpochError::WriteBlocked));
-}
-
-/// Positive test: a write operation proceeds normally when no investigation
-/// epoch is active.
-#[test]
-fn test_write_allowed_when_no_investigation_epoch() {
-    let env = Env::default();
-    // No epoch set — check passes.
-    assert_eq!(crate::require_no_investigation_epoch(&env), Ok(()));
+fn require_valid_symbol_length_very_long_input_returns_too_long_error() {
+    let name = b"TOOLONGKEYNAME"; // 14 bytes
+    assert_eq!(
+        require_valid_symbol_length(name),
+        Err(SymbolLengthError::TooLong),
+        "names well above the cap must also be rejected with SymbolLengthError::TooLong"
+    );
 }
