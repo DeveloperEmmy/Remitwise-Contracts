@@ -30,19 +30,19 @@ mod remittance_split {
     impl RemittanceSplit {
         pub fn get_split(env: &Env) -> Vec<u32> {
             let mut split = Vec::new(env);
-            split.push_back(50);
-            split.push_back(30);
-            split.push_back(15);
-            split.push_back(5);
+            split.push_back(5000);
+            split.push_back(3000);
+            split.push_back(1500);
+            split.push_back(500);
             split
         }
 
         pub fn calculate_split(env: Env, total_amount: i128) -> Vec<i128> {
             let mut amounts = Vec::new(&env);
-            amounts.push_back(total_amount * 50 / 100);
-            amounts.push_back(total_amount * 30 / 100);
-            amounts.push_back(total_amount * 15 / 100);
-            amounts.push_back(total_amount * 5 / 100);
+            amounts.push_back(total_amount * 5000 / 10000);
+            amounts.push_back(total_amount * 3000 / 10000);
+            amounts.push_back(total_amount * 1500 / 10000);
+            amounts.push_back(total_amount * 500 / 10000);
             amounts
         }
     }
@@ -285,6 +285,7 @@ mod family_wallet {
     pub const MODE_MISSING: u32 = 2;
     pub const MODE_EMPTY: u32 = 3;
     pub const MODE_OVERFLOW: u32 = 4;
+    pub const MODE_DUPLICATE_PAGES: u32 = 5;
 
     mod scenario {
         use super::*;
@@ -363,6 +364,17 @@ mod family_wallet {
                             next_cursor: 0,
                         }
                     }
+                    MODE_DUPLICATE_PAGES => {
+                        let mut items = Vec::new(&env);
+                        if let Some(member) = members.get(0) {
+                            items.push_back(member);
+                        }
+                        MemberAddressPage {
+                            count: items.len(),
+                            items,
+                            next_cursor: if cursor == 0 { 1 } else { 0 },
+                        }
+                    }
                     _ => MemberAddressPage {
                         count: members.len(),
                         items: members,
@@ -411,6 +423,7 @@ mod family_wallet {
                             Some(tracker(1))
                         }
                     }
+                    MODE_DUPLICATE_PAGES => Some(tracker(100)),
                     _ => None,
                 }
             }
@@ -418,6 +431,71 @@ mod family_wallet {
     }
 
     pub use scenario::{FamilyWalletScenario, FamilyWalletScenarioClient};
+}
+
+mod family_wallet_infinite {
+    use crate::{FamilyWalletTrait, MemberAddressPage, SpendingPeriod, SpendingTracker};
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Vec};
+
+    fn tracker(current_spent: i128) -> SpendingTracker {
+        SpendingTracker {
+            current_spent,
+            last_tx_timestamp: 1_704_067_200,
+            tx_count: 1,
+            period: SpendingPeriod {
+                period_type: 2,
+                period_start: 1_704_067_200,
+                period_duration: 2_592_000,
+            },
+        }
+    }
+
+    #[contract]
+    pub struct FamilyWalletInfinite;
+
+    #[contractimpl]
+    impl FamilyWalletInfinite {
+        pub fn seed(env: Env) {
+            let mut addrs = Vec::new(&env);
+            for _ in 0..25 {
+                addrs.push_back(Address::generate(&env));
+            }
+            env.storage().instance().set(&symbol_short!("ADDR"), &addrs);
+        }
+    }
+
+    #[contractimpl]
+    impl FamilyWalletTrait for FamilyWalletInfinite {
+        fn get_owner(env: &Env) -> Address {
+            Address::generate(env)
+        }
+
+        fn get_member_addresses_page(env: Env, cursor: u32, _limit: u32) -> MemberAddressPage {
+            let addrs: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&symbol_short!("ADDR"))
+                .unwrap_or_else(|| Vec::new(&env));
+            let mut items = Vec::new(&env);
+            if let Some(member) = addrs.get(cursor) {
+                items.push_back(member);
+            }
+            MemberAddressPage {
+                count: items.len(),
+                items,
+                next_cursor: if cursor + 1 < addrs.len() {
+                    cursor + 1
+                } else {
+                    0
+                },
+            }
+        }
+
+        fn get_spending_tracker(_env: Env, _member: Address) -> Option<SpendingTracker> {
+            Some(tracker(10))
+        }
+    }
 }
 
 #[test]
@@ -782,7 +860,7 @@ fn test_get_remittance_summary() {
     let spending = summary.category_breakdown.get(0).unwrap();
     assert_eq!(spending.category, Category::Spending);
     assert_eq!(spending.amount, 5000);
-    assert_eq!(spending.percentage, 50);
+    assert_eq!(spending.percentage, 5000);
 }
 
 #[test]
@@ -1258,6 +1336,118 @@ fn test_get_family_spending_report_requires_user_auth() {
     let auths = env.auths();
     let found = auths.iter().any(|(addr, _)| *addr == user);
     assert!(found, "family spending report must require user auth");
+}
+
+#[test]
+fn test_get_family_spending_report_rejects_invalid_period() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let result = client.try_get_family_spending_report(&user, &user, &200, &100);
+    assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
+}
+
+#[test]
+fn test_get_family_spending_report_addresses_not_configured() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let result =
+        client.try_get_family_spending_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
+    assert!(matches!(
+        result,
+        Err(Ok(ReportingError::AddressesNotConfigured))
+    ));
+}
+
+#[test]
+fn test_get_family_spending_report_partial_when_member_pages_exceed_cap() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1704067200);
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet_id =
+        env.register_contract(None, family_wallet_infinite::FamilyWalletInfinite);
+    family_wallet_infinite::FamilyWalletInfiniteClient::new(&env, &family_wallet_id).seed();
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet_id,
+    );
+
+    let report =
+        client.get_family_spending_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
+
+    assert_eq!(
+        report.data_availability,
+        DataAvailability::Partial,
+        "unbounded member paging must yield Partial after MAX_DEP_PAGES"
+    );
+    assert_eq!(
+        report.total_members, MAX_DEP_PAGES,
+        "exactly MAX_DEP_PAGES members must be collected before the cap fires"
+    );
+    assert_eq!(report.total_spending, (MAX_DEP_PAGES as i128) * 10);
+}
+
+#[test]
+fn test_get_family_spending_report_deduplicates_members() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1704067200);
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet_id = env.register_contract(None, family_wallet::FamilyWalletScenario);
+    let member = Address::generate(&env);
+    let mut members = soroban_sdk::Vec::new(&env);
+    members.push_back(member.clone());
+    let family_client = family_wallet::FamilyWalletScenarioClient::new(&env, &family_wallet_id);
+    family_client.seed(&family_wallet::MODE_DUPLICATE_PAGES, &members);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet_id,
+    );
+
+    let report =
+        client.get_family_spending_report(&user, &user, &1_704_067_200u64, &1_706_745_600u64);
+
+    assert_eq!(report.total_members, 1);
+    assert_eq!(report.total_spending, 100);
+    assert_eq!(report.average_per_member, 100);
+    assert_eq!(report.data_availability, DataAvailability::Complete);
 }
 
 #[test]

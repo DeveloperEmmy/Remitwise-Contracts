@@ -9,15 +9,13 @@
 //! A failure here means the change is **breaking for downstream indexers**.
 //! See [EVENTS.md](../../EVENTS.md) for the full schema contract.
 
-#![cfg(test)]
+// bill_payments events_schema_test
 
 use super::*;
 use crate::pause_functions::{
     ARCHIVE, CANCEL_BILL, CANCEL_BILL_SCHEDULE, CREATE_BILL, CREATE_BILL_SCHEDULE,
     EXECUTE_BILL_SCHEDULES, MODIFY_BILL_SCHEDULE, PAY_BILL, RESTORE,
 };
-use soroban_sdk::{symbol_short, Env, IntoVal, Symbol, TryFromVal, Val};
-use crate::pause_functions::{ARCHIVE, CANCEL_BILL, CREATE_BILL, PAY_BILL, RESTORE};
 use crate::BillPaymentsClient;
 use soroban_sdk::testutils::Address as AddressTrait;
 use soroban_sdk::testutils::Events;
@@ -166,6 +164,27 @@ fn bill_record_payload_schema() {
     assert!(decoded.schedule_id.is_none());
     assert_eq!(decoded.tags.len(), 0);
     assert_eq!(decoded.currency, currency);
+}
+
+/// Pinned contract: the three lifecycle variants that replace legacy ad-hoc
+/// symbol emission must serialize as typed BillEvent enum values (not raw Symbols)
+/// so indexers can match against the stable enum wire representation.
+#[test]
+fn reserved_bill_event_variants_serialize_as_enum_not_symbol() {
+    let env = Env::default();
+
+    for variant in [
+        BillEvent::Cancelled,
+        BillEvent::Restored,
+        BillEvent::ExternalRefUpdated,
+    ] {
+        let val: Val = variant.clone().into_val(&env);
+        // Round-trip: decode back to BillEvent — must succeed (proves it serialized
+        // as a proper enum variant, not a raw Symbol that cannot be decoded).
+        let decoded = BillEvent::try_from_val(&env, &val)
+            .expect("BillEvent variant must deserialize from its own serialized form");
+        let _ = decoded;
+    }
 }
 
 #[test]

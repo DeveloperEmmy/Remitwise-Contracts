@@ -11,18 +11,32 @@ fn set_time(env: &Env, timestamp: u64) {
     env.ledger().set_timestamp(timestamp);
 }
 
+struct SplitTestHarness<'a> {
+    pub env: Env,
+    pub client: RemittanceSplitClient<'a>,
+    pub owner: Address,
+    pub token_addr: Address,
+    pub stellar_client: StellarAssetClient<'a>,
+}
+
+impl Drop for SplitTestHarness<'_> {
+    fn drop(&mut self) {
+        let token_client = soroban_sdk::token::TokenClient::new(&self.env, &self.token_addr);
+        assert_eq!(
+            token_client.balance(&self.client.address),
+            0,
+            "funds were lost in the contract"
+        );
+    }
+}
+
 fn setup_split(
     env: &Env,
     spending: u32,
     savings: u32,
     bills: u32,
     insurance: u32,
-) -> (
-    RemittanceSplitClient<'_>,
-    Address,
-    Address,
-    StellarAssetClient<'_>,
-) {
+) -> SplitTestHarness<'_> {
     env.mock_all_auths();
     set_time(env, 1_000);
 
@@ -45,7 +59,13 @@ fn setup_split(
         &insurance,
     );
 
-    (client, owner, token_addr, stellar_client)
+    SplitTestHarness {
+        env: env.clone(),
+        client,
+        owner,
+        token_addr,
+        stellar_client,
+    }
 }
 
 fn sample_accounts(env: &Env) -> AccountGroup {
@@ -86,7 +106,7 @@ fn test_distribution_completed_event() {
 
     // 1. Initialize split
     // percentages: 40, 30, 20, 10
-    client.initialize_split(&owner, &0, &token_addr, &40, &30, &20, &10);
+    client.initialize_split(&owner, &0, &token_addr, &4000, &3000, &2000, &1000);
 
     // 2. Setup destination accounts
     let accounts = AccountGroup {
@@ -161,7 +181,7 @@ fn test_distribution_event_topic_correctness() {
     let token_addr = token_contract.address();
     let stellar_client = StellarAssetClient::new(&env, &token_addr);
 
-    client.initialize_split(&owner, &0, &token_addr, &50, &50, &0, &0);
+    client.initialize_split(&owner, &0, &token_addr, &5000, &5000, &0, &0);
 
     let accounts = AccountGroup {
         spending: Address::generate(&env),
@@ -247,6 +267,34 @@ fn test_request_hash_deterministic() {
     assert_eq!(hash1.len(), 32);
 }
 
+/// SHA-256 output (32 bytes) is well within MAX_BYTES_RETURN (8 192).
+/// The XDR length guard must never fire for valid `get_request_hash` calls.
+#[test]
+fn test_get_request_hash_passes_xdr_length_guard() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let request = DistributeUsdcRequest {
+        usdc_contract: Address::generate(&env),
+        from: Address::generate(&env),
+        nonce: 0,
+        accounts: AccountGroup {
+            spending: Address::generate(&env),
+            savings: Address::generate(&env),
+            bills: Address::generate(&env),
+            insurance: Address::generate(&env),
+        },
+        total_amount: 1_000i128,
+        deadline: 9_999u64,
+    };
+
+    // client.get_request_hash() panics if the contract returns Err — this
+    // verifies that the guard does not fire for the 32-byte SHA-256 result.
+    let hash = client.get_request_hash(&request);
+    assert_eq!(hash.len(), 32, "SHA-256 must produce exactly 32 bytes");
+}
+
 /// Verifies that reading instance storage (`get_config`) bumps the instance TTL.
 ///
 /// NOTE: This test used to also assert that reading a schedule via
@@ -263,7 +311,11 @@ fn test_ttl_extensions() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (client, _owner, _token_addr, _stellar_client) = setup_split(&env, 40, 30, 20, 10);
+    let harness = setup_split(&env, 40, 30, 20, 10);
+    let client = &harness.client;
+    let _owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
+    let _stellar_client = &harness.stellar_client;
 
     // Check Instance TTL extension (CONFIG).
     // Initial sequence is 0. Threshold is INSTANCE_LIFETIME_THRESHOLD.
@@ -281,6 +333,9 @@ fn test_ttl_extensions() {
     env.ledger().set_sequence_number(threshold + 1);
     let config = client.get_config();
     assert!(config.is_some(), "Config should exist after TTL bump");
+
+    // Reset sequence number to prevent Drop's token.balance() call from failing due to token contract TTL expiration.
+    env.ledger().set_sequence_number(0);
 }
 
 /// Test that changing any parameter changes the hash (no collisions)
@@ -374,14 +429,16 @@ fn test_distribute_usdc_deadline_expired() {
     set_time(&env, 1000);
 
     let owner = Address::generate(&env);
-    let usdc_contract = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+    let usdc_contract = token_contract.address();
     let spending = Address::generate(&env);
     let savings = Address::generate(&env);
     let bills = Address::generate(&env);
     let insurance = Address::generate(&env);
 
     // Initialize contract
-    client.initialize_split(&owner, &0, &usdc_contract, &50, &30, &15, &5);
+    client.initialize_split(&owner, &0, &usdc_contract, &5000, &3000, &1500, &500);
 
     // Create request with deadline in the past (500 < 1000)
     let request = DistributeUsdcRequest {
@@ -414,14 +471,16 @@ fn test_distribute_usdc_deadline_too_far() {
     set_time(&env, 1000);
 
     let owner = Address::generate(&env);
-    let usdc_contract = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+    let usdc_contract = token_contract.address();
     let spending = Address::generate(&env);
     let savings = Address::generate(&env);
     let bills = Address::generate(&env);
     let insurance = Address::generate(&env);
 
     // Initialize contract
-    client.initialize_split(&owner, &0, &usdc_contract, &50, &30, &15, &5);
+    client.initialize_split(&owner, &0, &usdc_contract, &5000, &3000, &1500, &500);
 
     // Create request with deadline > MAX_DEADLINE_WINDOW_SECS from now
     let request = DistributeUsdcRequest {
@@ -454,14 +513,16 @@ fn test_distribute_usdc_deadline_zero() {
     set_time(&env, 1000);
 
     let owner = Address::generate(&env);
-    let usdc_contract = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+    let usdc_contract = token_contract.address();
     let spending = Address::generate(&env);
     let savings = Address::generate(&env);
     let bills = Address::generate(&env);
     let insurance = Address::generate(&env);
 
     // Initialize contract
-    client.initialize_split(&owner, &0, &usdc_contract, &50, &30, &15, &5);
+    client.initialize_split(&owner, &0, &usdc_contract, &5000, &3000, &1500, &500);
 
     // Create request with deadline = 0
     let request = DistributeUsdcRequest {
@@ -494,14 +555,16 @@ fn test_distribute_usdc_hash_mismatch() {
     set_time(&env, 1000);
 
     let owner = Address::generate(&env);
-    let usdc_contract = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+    let usdc_contract = token_contract.address();
     let spending = Address::generate(&env);
     let savings = Address::generate(&env);
     let bills = Address::generate(&env);
     let insurance = Address::generate(&env);
 
     // Initialize contract
-    client.initialize_split(&owner, &0, &usdc_contract, &50, &30, &15, &5);
+    client.initialize_split(&owner, &0, &usdc_contract, &5000, &3000, &1500, &500);
 
     // Create valid request
     let request = DistributeUsdcRequest {
@@ -537,14 +600,16 @@ fn test_distribute_usdc_deadline_at_boundary() {
     set_time(&env, 1000);
 
     let owner = Address::generate(&env);
-    let usdc_contract = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+    let usdc_contract = token_contract.address();
     let spending = Address::generate(&env);
     let savings = Address::generate(&env);
     let bills = Address::generate(&env);
     let insurance = Address::generate(&env);
 
     // Initialize contract
-    client.initialize_split(&owner, &0, &usdc_contract, &50, &30, &15, &5);
+    client.initialize_split(&owner, &0, &usdc_contract, &5000, &3000, &1500, &500);
 
     // Create request with deadline exactly at MAX_DEADLINE_WINDOW_SECS boundary
     let request = DistributeUsdcRequest {
@@ -832,14 +897,7 @@ fn test_request_hash_mismatch_nonce_reuse_new_deadline() {
     );
 }
 
-fn setup_request_hash_distribution(
-    env: &Env,
-) -> (
-    RemittanceSplitClient<'_>,
-    Address,
-    Address,
-    StellarAssetClient<'_>,
-) {
+fn setup_request_hash_distribution(env: &Env) -> SplitTestHarness<'_> {
     env.mock_all_auths();
     set_time(env, 1_000);
 
@@ -851,9 +909,15 @@ fn setup_request_hash_distribution(
     let token_addr = token_contract.address();
     let stellar_client = StellarAssetClient::new(env, &token_addr);
 
-    client.initialize_split(&owner, &0, &token_addr, &40, &30, &20, &10);
+    client.initialize_split(&owner, &0, &token_addr, &4000, &3000, &2000, &1000);
 
-    (client, owner, token_addr, stellar_client)
+    SplitTestHarness {
+        env: env.clone(),
+        client,
+        owner,
+        token_addr,
+        stellar_client,
+    }
 }
 
 fn request_hash_distribution_request(
@@ -877,7 +941,10 @@ fn assert_distribution_request_tamper_rejected(
     mutate: impl FnOnce(&mut DistributeUsdcRequest),
     field_name: &str,
 ) {
-    let (client, owner, token_addr, _stellar_client) = setup_request_hash_distribution(env);
+    let harness = setup_request_hash_distribution(env);
+    let client = &harness.client;
+    let owner = harness.owner.clone();
+    let token_addr = harness.token_addr.clone();
     let original = request_hash_distribution_request(env, token_addr, owner, 1);
     let hash = client.get_request_hash(&original);
 
@@ -896,7 +963,11 @@ fn assert_distribution_request_tamper_rejected(
 #[test]
 fn test_request_hash_distribution_happy_path_succeeds() {
     let env = Env::default();
-    let (client, owner, token_addr, stellar_client) = setup_request_hash_distribution(&env);
+    let harness = setup_request_hash_distribution(&env);
+    let client = &harness.client;
+    let owner = harness.owner.clone();
+    let token_addr = harness.token_addr.clone();
+    let stellar_client = &harness.stellar_client;
     let request = request_hash_distribution_request(&env, token_addr, owner.clone(), 1);
     stellar_client.mint(&owner, &request.total_amount);
     let hash = client.get_request_hash(&request);
@@ -968,7 +1039,11 @@ fn test_request_hash_mismatch_on_account_reordering() {
 #[test]
 fn test_request_hash_hashed_path_rejects_used_nonce() {
     let env = Env::default();
-    let (client, owner, token_addr, stellar_client) = setup_request_hash_distribution(&env);
+    let harness = setup_request_hash_distribution(&env);
+    let client = &harness.client;
+    let owner = harness.owner.clone();
+    let token_addr = harness.token_addr.clone();
+    let stellar_client = &harness.stellar_client;
     let request = request_hash_distribution_request(&env, token_addr, owner.clone(), 1);
     stellar_client.mint(&owner, &(request.total_amount * 2));
     let hash = client.get_request_hash(&request);
@@ -985,7 +1060,10 @@ fn test_request_hash_hashed_path_rejects_used_nonce() {
 #[test]
 fn test_request_hash_hashed_path_rejects_expired_deadline() {
     let env = Env::default();
-    let (client, owner, token_addr, _stellar_client) = setup_request_hash_distribution(&env);
+    let harness = setup_request_hash_distribution(&env);
+    let client = &harness.client;
+    let owner = harness.owner.clone();
+    let token_addr = harness.token_addr.clone();
     let mut request = request_hash_distribution_request(&env, token_addr, owner, 1);
     request.deadline = env.ledger().timestamp() - 1;
     let hash = client.get_request_hash(&request);
@@ -998,7 +1076,10 @@ fn test_request_hash_hashed_path_rejects_expired_deadline() {
 #[test]
 fn test_request_hash_hashed_path_rejects_invalid_deadline() {
     let env = Env::default();
-    let (client, owner, token_addr, _stellar_client) = setup_request_hash_distribution(&env);
+    let harness = setup_request_hash_distribution(&env);
+    let client = &harness.client;
+    let owner = harness.owner.clone();
+    let token_addr = harness.token_addr.clone();
     let mut request = request_hash_distribution_request(&env, token_addr, owner, 1);
     request.deadline = env.ledger().timestamp() + MAX_DEADLINE_WINDOW_SECS + 1;
     let hash = client.get_request_hash(&request);
@@ -1011,7 +1092,10 @@ fn test_request_hash_hashed_path_rejects_invalid_deadline() {
 #[test]
 fn test_request_hash_hashed_path_rejects_self_transfer() {
     let env = Env::default();
-    let (client, owner, token_addr, _stellar_client) = setup_request_hash_distribution(&env);
+    let harness = setup_request_hash_distribution(&env);
+    let client = &harness.client;
+    let owner = harness.owner.clone();
+    let token_addr = harness.token_addr.clone();
     let mut request = request_hash_distribution_request(&env, token_addr, owner.clone(), 1);
     request.accounts.spending = owner;
     let hash = client.get_request_hash(&request);
@@ -1027,8 +1111,10 @@ fn test_request_hash_hashed_path_rejects_self_transfer() {
 #[test]
 fn test_request_hash_hashed_path_rejects_untrusted_token_contract() {
     let env = Env::default();
-    let (client, owner, _trusted_token_addr, _stellar_client) =
-        setup_request_hash_distribution(&env);
+    let harness = setup_request_hash_distribution(&env);
+    let client = &harness.client;
+    let owner = harness.owner.clone();
+    let _trusted_token_addr = harness.token_addr.clone();
     let token_admin = Address::generate(&env);
     let untrusted_token_contract = env.register_stellar_asset_contract_v2(token_admin);
     let request =
@@ -1054,7 +1140,10 @@ fn test_request_hash_hashed_path_rejects_untrusted_token_contract() {
 #[test]
 fn test_execute_due_remittance_schedules_basic() {
     let env = Env::default();
-    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let harness = setup_split(&env, 50, 30, 15, 5);
+    let client = &harness.client;
+    let owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
 
     env.mock_all_auths();
     set_time(&env, 1_000);
@@ -1087,7 +1176,10 @@ fn test_execute_due_remittance_schedules_basic() {
 #[test]
 fn test_execute_recurring_remittance_schedule() {
     let env = Env::default();
-    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let harness = setup_split(&env, 50, 30, 15, 5);
+    let client = &harness.client;
+    let owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
 
     env.mock_all_auths();
     set_time(&env, 1_000);
@@ -1121,7 +1213,10 @@ fn test_execute_recurring_remittance_schedule() {
 #[test]
 fn test_execute_missed_remittance_schedules() {
     let env = Env::default();
-    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let harness = setup_split(&env, 50, 30, 15, 5);
+    let client = &harness.client;
+    let owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
 
     env.mock_all_auths();
     set_time(&env, 1_000);
@@ -1149,7 +1244,10 @@ fn test_execute_missed_remittance_schedules() {
 #[test]
 fn test_execute_idempotent_oneshot() {
     let env = Env::default();
-    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let harness = setup_split(&env, 50, 30, 15, 5);
+    let client = &harness.client;
+    let owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
 
     env.mock_all_auths();
     set_time(&env, 1_000);
@@ -1186,7 +1284,10 @@ fn test_execute_idempotent_oneshot() {
 #[test]
 fn test_execute_idempotent_recurring() {
     let env = Env::default();
-    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let harness = setup_split(&env, 50, 30, 15, 5);
+    let client = &harness.client;
+    let owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
 
     env.mock_all_auths();
     set_time(&env, 1_000);
@@ -1224,7 +1325,10 @@ fn test_execute_idempotent_recurring() {
 #[test]
 fn test_execute_skips_inactive_schedules() {
     let env = Env::default();
-    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let harness = setup_split(&env, 50, 30, 15, 5);
+    let client = &harness.client;
+    let owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
 
     env.mock_all_auths();
     set_time(&env, 1_000);
@@ -1246,7 +1350,10 @@ fn test_execute_skips_inactive_schedules() {
 #[test]
 fn test_execute_skips_not_yet_due() {
     let env = Env::default();
-    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let harness = setup_split(&env, 50, 30, 15, 5);
+    let client = &harness.client;
+    let owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
 
     env.mock_all_auths();
     set_time(&env, 1_000);
@@ -1274,7 +1381,10 @@ fn test_execute_skips_not_yet_due() {
 #[test]
 fn test_execute_exactly_equal_next_due() {
     let env = Env::default();
-    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let harness = setup_split(&env, 50, 30, 15, 5);
+    let client = &harness.client;
+    let owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
 
     env.mock_all_auths();
     set_time(&env, 1_000);
@@ -1293,7 +1403,10 @@ fn test_execute_exactly_equal_next_due() {
 #[test]
 fn test_execute_empty_schedule_set() {
     let env = Env::default();
-    let (client, _owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let harness = setup_split(&env, 50, 30, 15, 5);
+    let client = &harness.client;
+    let _owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
 
     env.mock_all_auths();
     set_time(&env, 1_000);
@@ -1309,7 +1422,10 @@ fn test_execute_empty_schedule_set() {
 #[test]
 fn test_execute_all_inactive_set() {
     let env = Env::default();
-    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let harness = setup_split(&env, 50, 30, 15, 5);
+    let client = &harness.client;
+    let owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
 
     env.mock_all_auths();
     set_time(&env, 1_000);
@@ -1336,7 +1452,10 @@ fn test_execute_all_inactive_set() {
 #[test]
 fn test_execute_paused_contract_returns_empty() {
     let env = Env::default();
-    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let harness = setup_split(&env, 50, 30, 15, 5);
+    let client = &harness.client;
+    let owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
 
     env.mock_all_auths();
     set_time(&env, 1_000);
@@ -1385,7 +1504,11 @@ fn test_execute_due_remittance_schedules_fanout_dust_conservation() {
 
     // Use one contract instance with a fixed split regime.
     // (Percentages are fixed per RemittanceSplit instance.)
-    let (client, owner, _token_addr, _stellar_client) = setup_split(&env, 37, 33, 20, 10);
+    let harness = setup_split(&env, 37, 33, 20, 10);
+    let client = &harness.client;
+    let owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
+    let _stellar_client = &harness.stellar_client;
 
     // Seed due schedules at/under a single ledger time.
     // Include both one-off (interval=0) and recurring (interval>0).
@@ -1537,7 +1660,10 @@ fn test_execute_due_remittance_schedules_fanout_dust_conservation() {
 #[test]
 fn test_execute_mixed_due_not_due() {
     let env = Env::default();
-    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let harness = setup_split(&env, 50, 30, 15, 5);
+    let client = &harness.client;
+    let owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
 
     env.mock_all_auths();
     set_time(&env, 1_000);
@@ -1591,14 +1717,7 @@ fn test_execute_mixed_due_not_due() {
 //
 // Security: expired/invalid deadlines must NOT advance the nonce.
 
-fn setup_signed_distribution(
-    env: &Env,
-) -> (
-    RemittanceSplitClient<'_>,
-    Address,
-    Address,
-    soroban_sdk::token::StellarAssetClient<'_>,
-) {
+fn setup_signed_distribution(env: &Env) -> SplitTestHarness<'_> {
     env.mock_all_auths();
     env.ledger().set_timestamp(10_000);
 
@@ -1611,10 +1730,16 @@ fn setup_signed_distribution(
     let token_addr = token_contract.address();
     let stellar_client = soroban_sdk::token::StellarAssetClient::new(env, &token_addr);
 
-    client.initialize_split(&owner, &0, &token_addr, &40, &30, &20, &10);
+    client.initialize_split(&owner, &0, &token_addr, &4000, &3000, &2000, &1000);
     stellar_client.mint(&owner, &10_000i128);
 
-    (client, owner, token_addr, stellar_client)
+    SplitTestHarness {
+        env: env.clone(),
+        client,
+        owner,
+        token_addr,
+        stellar_client,
+    }
 }
 
 fn make_request(
@@ -1643,13 +1768,16 @@ fn make_request(
 #[test]
 fn test_deadline_zero_is_invalid() {
     let env = Env::default();
-    let (client, owner, token_addr, _) = setup_signed_distribution(&env);
+    let harness = setup_signed_distribution(&env);
+    let client = &harness.client;
+    let owner = harness.owner.clone();
+    let token_addr = harness.token_addr.clone();
     let _now = env.ledger().timestamp();
 
     let request = make_request(&env, token_addr.clone(), owner.clone(), 1, 0);
     let result = client.try_distribute_usdc_hashed(
         &request,
-        &RemittanceSplit::get_request_hash(env.clone(), request.clone()),
+        &RemittanceSplit::get_request_hash(env.clone(), request.clone()).unwrap(),
     );
     assert_eq!(result, Err(Ok(RemittanceSplitError::InvalidDeadline)));
 }
@@ -1658,13 +1786,16 @@ fn test_deadline_zero_is_invalid() {
 #[test]
 fn test_deadline_equal_to_now_is_expired() {
     let env = Env::default();
-    let (client, owner, token_addr, _) = setup_signed_distribution(&env);
+    let harness = setup_signed_distribution(&env);
+    let client = &harness.client;
+    let owner = harness.owner.clone();
+    let token_addr = harness.token_addr.clone();
     let now = env.ledger().timestamp();
 
     let request = make_request(&env, token_addr.clone(), owner.clone(), 1, now);
     let result = client.try_distribute_usdc_hashed(
         &request,
-        &RemittanceSplit::get_request_hash(env.clone(), request.clone()),
+        &RemittanceSplit::get_request_hash(env.clone(), request.clone()).unwrap(),
     );
     assert_eq!(result, Err(Ok(RemittanceSplitError::DeadlineExpired)));
 }
@@ -1673,13 +1804,16 @@ fn test_deadline_equal_to_now_is_expired() {
 #[test]
 fn test_deadline_one_second_past_is_expired() {
     let env = Env::default();
-    let (client, owner, token_addr, _) = setup_signed_distribution(&env);
+    let harness = setup_signed_distribution(&env);
+    let client = &harness.client;
+    let owner = harness.owner.clone();
+    let token_addr = harness.token_addr.clone();
     let now = env.ledger().timestamp();
 
     let request = make_request(&env, token_addr.clone(), owner.clone(), 1, now - 1);
     let result = client.try_distribute_usdc_hashed(
         &request,
-        &RemittanceSplit::get_request_hash(env.clone(), request.clone()),
+        &RemittanceSplit::get_request_hash(env.clone(), request.clone()).unwrap(),
     );
     assert_eq!(result, Err(Ok(RemittanceSplitError::DeadlineExpired)));
 }
@@ -1688,14 +1822,17 @@ fn test_deadline_one_second_past_is_expired() {
 #[test]
 fn test_deadline_one_second_future_is_accepted() {
     let env = Env::default();
-    let (client, owner, token_addr, _) = setup_signed_distribution(&env);
+    let harness = setup_signed_distribution(&env);
+    let client = &harness.client;
+    let owner = harness.owner.clone();
+    let token_addr = harness.token_addr.clone();
     let now = env.ledger().timestamp();
 
     let request = make_request(&env, token_addr.clone(), owner.clone(), 1, now + 1);
     // Should not return DeadlineExpired or InvalidDeadline
     let result = client.try_distribute_usdc_hashed(
         &request,
-        &RemittanceSplit::get_request_hash(env.clone(), request.clone()),
+        &RemittanceSplit::get_request_hash(env.clone(), request.clone()).unwrap(),
     );
     assert!(
         result != Err(Ok(RemittanceSplitError::DeadlineExpired))
@@ -1708,7 +1845,10 @@ fn test_deadline_one_second_future_is_accepted() {
 #[test]
 fn test_deadline_at_max_window_is_accepted() {
     let env = Env::default();
-    let (client, owner, token_addr, _) = setup_signed_distribution(&env);
+    let harness = setup_signed_distribution(&env);
+    let client = &harness.client;
+    let owner = harness.owner.clone();
+    let token_addr = harness.token_addr.clone();
     let now = env.ledger().timestamp();
 
     let request = make_request(
@@ -1720,7 +1860,7 @@ fn test_deadline_at_max_window_is_accepted() {
     );
     let result = client.try_distribute_usdc_hashed(
         &request,
-        &RemittanceSplit::get_request_hash(env.clone(), request.clone()),
+        &RemittanceSplit::get_request_hash(env.clone(), request.clone()).unwrap(),
     );
     assert!(
         result != Err(Ok(RemittanceSplitError::DeadlineExpired))
@@ -1733,7 +1873,10 @@ fn test_deadline_at_max_window_is_accepted() {
 #[test]
 fn test_deadline_beyond_max_window_is_invalid() {
     let env = Env::default();
-    let (client, owner, token_addr, _) = setup_signed_distribution(&env);
+    let harness = setup_signed_distribution(&env);
+    let client = &harness.client;
+    let owner = harness.owner.clone();
+    let token_addr = harness.token_addr.clone();
     let now = env.ledger().timestamp();
 
     let request = make_request(
@@ -1745,7 +1888,7 @@ fn test_deadline_beyond_max_window_is_invalid() {
     );
     let result = client.try_distribute_usdc_hashed(
         &request,
-        &RemittanceSplit::get_request_hash(env.clone(), request.clone()),
+        &RemittanceSplit::get_request_hash(env.clone(), request.clone()).unwrap(),
     );
     assert_eq!(result, Err(Ok(RemittanceSplitError::InvalidDeadline)));
 }
@@ -1754,7 +1897,10 @@ fn test_deadline_beyond_max_window_is_invalid() {
 #[test]
 fn test_expired_deadline_does_not_advance_nonce() {
     let env = Env::default();
-    let (client, owner, token_addr, _) = setup_signed_distribution(&env);
+    let harness = setup_signed_distribution(&env);
+    let client = &harness.client;
+    let owner = harness.owner.clone();
+    let token_addr = harness.token_addr.clone();
     let now = env.ledger().timestamp();
 
     let nonce_before = client.get_nonce(&owner);
@@ -1762,7 +1908,7 @@ fn test_expired_deadline_does_not_advance_nonce() {
     let request = make_request(&env, token_addr.clone(), owner.clone(), 1, now - 1);
     let _ = client.try_distribute_usdc_hashed(
         &request,
-        &RemittanceSplit::get_request_hash(env.clone(), request.clone()),
+        &RemittanceSplit::get_request_hash(env.clone(), request.clone()).unwrap(),
     );
 
     let nonce_after = client.get_nonce(&owner);
@@ -1776,14 +1922,17 @@ fn test_expired_deadline_does_not_advance_nonce() {
 #[test]
 fn test_invalid_deadline_does_not_advance_nonce() {
     let env = Env::default();
-    let (client, owner, token_addr, _) = setup_signed_distribution(&env);
+    let harness = setup_signed_distribution(&env);
+    let client = &harness.client;
+    let owner = harness.owner.clone();
+    let token_addr = harness.token_addr.clone();
 
     let nonce_before = client.get_nonce(&owner);
 
     let request = make_request(&env, token_addr.clone(), owner.clone(), 1, 0);
     let _ = client.try_distribute_usdc_hashed(
         &request,
-        &RemittanceSplit::get_request_hash(env.clone(), request.clone()),
+        &RemittanceSplit::get_request_hash(env.clone(), request.clone()).unwrap(),
     );
 
     let nonce_after = client.get_nonce(&owner);
@@ -1798,7 +1947,9 @@ fn test_invalid_deadline_does_not_advance_nonce() {
 #[test]
 fn test_get_schedules_paginated_full_scale_cursor_monotonicity() {
     let env = Env::default();
-    let (client, owner, _, _) = setup_split(&env, 50, 30, 15, 5);
+    let harness = setup_split(&env, 50, 30, 15, 5);
+    let client = &harness.client;
+    let owner = &harness.owner;
     let other_owner = Address::generate(&env);
 
     let amount = 1_000i128;
@@ -1914,10 +2065,7 @@ fn assert_canonical_order(_env: &Env, allocs: &soroban_sdk::Vec<Allocation>) {
 
 /// Helper: assert sum of allocation amounts equals `total`.
 fn assert_conservation(allocs: &soroban_sdk::Vec<Allocation>, total: i128) {
-    let sum: i128 = allocs
-        .iter()
-        .map(|a| a.amount)
-        .sum();
+    let sum: i128 = allocs.iter().map(|a| a.amount).sum();
     assert_eq!(sum, total, "allocation amounts must sum to total_amount");
 }
 
@@ -1973,7 +2121,10 @@ fn test_get_split_allocations_single_100_percent_spending() {
     env.mock_all_auths();
     set_time(&env, 1_000);
 
-    let (client, _owner, _token_addr, _) = setup_split(&env, 100, 0, 0, 0);
+    let harness = setup_split(&env, 100, 0, 0, 0);
+    let client = &harness.client;
+    let _owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
     let _ = client; // client used only to initialize; call through impl directly
 
     let total: i128 = 500;
@@ -2001,7 +2152,10 @@ fn test_get_split_allocations_single_100_percent_insurance() {
     env.mock_all_auths();
     set_time(&env, 1_000);
 
-    let (client, _owner, _token_addr, _) = setup_split(&env, 0, 0, 0, 100);
+    let harness = setup_split(&env, 0, 0, 0, 100);
+    let client = &harness.client;
+    let _owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
     let _ = client;
 
     let total: i128 = 333;
@@ -2058,7 +2212,10 @@ fn test_get_split_allocations_amount_one_conservation() {
     set_time(&env, 1_000);
 
     // 25/25/25/25: each floor = floor(1*25/100) = 0; insurance = 1 - 0 - 0 - 0 = 1
-    let (client, _owner, _token_addr, _) = setup_split(&env, 25, 25, 25, 25);
+    let harness = setup_split(&env, 25, 25, 25, 25);
+    let client = &harness.client;
+    let _owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
     let _ = client;
 
     let allocs = env
@@ -2081,7 +2238,10 @@ fn test_get_split_allocations_ordering_is_deterministic() {
     env.mock_all_auths();
     set_time(&env, 1_000);
 
-    let (client, _owner, _token_addr, _) = setup_split(&env, 40, 30, 20, 10);
+    let harness = setup_split(&env, 40, 30, 20, 10);
+    let client = &harness.client;
+    let _owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
     let _ = client;
 
     let total: i128 = 1_000;
@@ -2113,7 +2273,10 @@ fn test_get_split_allocations_order_matches_get_split() {
     env.mock_all_auths();
     set_time(&env, 1_000);
 
-    let (client, _owner, _token_addr, _) = setup_split(&env, 40, 30, 20, 10);
+    let harness = setup_split(&env, 40, 30, 20, 10);
+    let client = &harness.client;
+    let _owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
 
     let total: i128 = 1_000;
     let split = env.as_contract(&client.address, || RemittanceSplit::get_split(&env)); // [40, 30, 20, 10]
@@ -2169,7 +2332,10 @@ fn test_get_split_allocations_large_amount_single_slot() {
     env.mock_all_auths();
     set_time(&env, 1_000);
 
-    let (client, _owner, _token_addr, _) = setup_split(&env, 100, 0, 0, 0);
+    let harness = setup_split(&env, 100, 0, 0, 0);
+    let client = &harness.client;
+    let _owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
     let _ = client;
 
     let total: i128 = i128::MAX / 100;
@@ -2194,7 +2360,10 @@ fn test_get_split_allocations_percentages_across_all_categories() {
     set_time(&env, 1_000);
 
     // 33/33/33/1 — non-round split that produces visible dust
-    let (client, _owner, _token_addr, _) = setup_split(&env, 33, 33, 33, 1);
+    let harness = setup_split(&env, 33, 33, 33, 1);
+    let client = &harness.client;
+    let _owner = &harness.owner;
+    let _token_addr = &harness.token_addr;
     let _ = client;
 
     let total: i128 = 10;
@@ -2216,71 +2385,165 @@ fn test_get_split_allocations_percentages_across_all_categories() {
 }
 
 #[test]
-fn test_pre_upgrade_roundtrip() {
+fn test_double_init_fails() {
     let env = Env::default();
     env.mock_all_auths();
     set_time(&env, 1_000);
 
-    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
 
-    // Set upgrade admin
-    let admin = Address::generate(&env);
-    client.set_upgrade_admin(&owner, &admin);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+    let token_addr = token_contract.address();
 
-    // Take snapshot
-    let result = client.try_pre_upgrade(&admin);
-    assert!(result.is_ok());
+    // First initialize should succeed
+    let result1 = client.try_initialize_split(&owner, &0, &token_addr, &40, &30, &20, &10);
+    assert_eq!(result1, Ok(Ok(true)), "first init should succeed");
 
-    // Modify state — change split percentages and version
-    client.update_split(&owner, &1, &20, &30, &30, &20);
-    client.set_version(&admin, &99);
-
-    // Verify state changed
-    let split = client.get_split();
-    assert_eq!(split.get(0).unwrap(), 20);
-    assert_eq!(client.get_version(), 99);
-
-    // Restore from snapshot
-    let result = client.try_restore_from_snapshot(&admin);
-    assert!(result.is_ok());
-
-    // Verify state was restored
-    let split = client.get_split();
-    assert_eq!(split.get(0).unwrap(), 50);
-    assert_eq!(split.get(1).unwrap(), 30);
-    assert_eq!(client.get_version(), 1);
+    // Second initialize should fail with AlreadyInitialized
+    let result2 = client.try_initialize_split(&owner, &1, &token_addr, &50, &25, &15, &10);
+    assert_eq!(
+        result2,
+        Err(Ok(RemittanceSplitError::AlreadyInitialized)),
+        "second init should fail with AlreadyInitialized"
+    );
 }
 
 #[test]
-fn test_pre_upgrade_unauthorized_fails() {
+fn test_not_initialized_fails() {
     let env = Env::default();
     env.mock_all_auths();
     set_time(&env, 1_000);
 
-    let (client, _owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
 
-    // Set upgrade admin
-    let admin = Address::generate(&env);
-    client.set_upgrade_admin(&_owner, &admin);
+    // Try to call a function that returns Option
+    let result = client.get_config();
+    assert!(
+        result.is_none(),
+        "get_config should return None when not initialized"
+    );
 
-    let stranger = Address::generate(&env);
-    let result = client.try_pre_upgrade(&stranger);
-    assert_eq!(result, Err(Ok(RemittanceSplitError::Unauthorized)));
+    // Try to call a function that returns Result (like set_pause_admin)
+    let owner = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let result2 = client.try_set_pause_admin(&owner, &new_admin);
+    assert_eq!(
+        result2,
+        Err(Ok(RemittanceSplitError::NotInitialized)),
+        "set_pause_admin should fail with NotInitialized when not initialized"
+    );
 }
 
 #[test]
-fn test_pre_upgrade_discard() {
+fn test_initialize_split_percentage_out_of_range() {
     let env = Env::default();
     env.mock_all_auths();
     set_time(&env, 1_000);
 
-    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
-    let admin = Address::generate(&env);
-    client.set_upgrade_admin(&owner, &admin);
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
 
-    client.pre_upgrade(&admin);
-    let result = client.try_discard_snapshot(&admin);
-    assert!(result.is_ok());
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+    let token_addr = token_contract.address();
+
+    // Call try_initialize_split with spending_percent = 10_001 (> 10_000)
+    let result = client.try_initialize_split(&owner, &0, &token_addr, &10_001, &0, &0, &0);
+
+    assert_eq!(result, Err(Ok(RemittanceSplitError::PercentageOutOfRange)));
+}
+
+#[test]
+fn test_initialize_split_percentages_invalid_sum() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+    let token_addr = token_contract.address();
+
+    // Call try_initialize_split with sum = 9_999 (!= 10_000)
+    let result = client.try_initialize_split(&owner, &0, &token_addr, &4_000, &3_000, &2_000, &999);
+
+    assert_eq!(
+        result,
+        Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100))
+    );
+}
+
+#[test]
+#[test]
+fn test_initialize_split_rejects_unsupported_ingress_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let result = client.try_initialize_split(&owner, &0, &token_addr, &4000, &3000, &2000, &1000);
+
+    assert_eq!(
+        result,
+        Err(Ok(RemittanceSplitError::UnsupportedTokenContract))
+    );
+}
+
+#[test]
+fn test_update_split_percentage_out_of_range() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let result = client.try_initialize_split(&owner, &0, &token_addr, &4000, &3000, &2000, &1000);
+
+    // Try to update with spending_percent > 10_000
+    let result = client.try_update_split(&owner, &1, &10_001, &0, &0, &0);
+
+    assert_eq!(result, Err(Ok(RemittanceSplitError::PercentageOutOfRange)));
+}
+
+#[test]
+fn test_update_split_percentages_invalid_sum() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    // Initialize with valid percentages first (sum = 10_000)
+    client.initialize_split(&owner, &0, &token_addr, &4_000, &3_000, &2_000, &1_000);
+
+    // Try to update with percentages that don't sum to 10_000 (sum = 9_999)
+    let result = client.try_update_split(&owner, &1, &4_000, &3_000, &2_000, &999);
+
+    assert_eq!(
+        result,
+        Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100))
+    );
 }
 
 // ── Event-version guard tests ──────────────────────────────────────────

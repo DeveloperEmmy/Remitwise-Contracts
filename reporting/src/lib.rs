@@ -4,8 +4,10 @@ use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, Address,
     Env, IntoVal, Map, TryFromVal, Val, Vec,
 };
+mod utils;
+use utils::u64_to_u32;
 
-pub use remitwise_common::{Category, CoverageType, DEFAULT_PAGE_LIMIT};
+pub use remitwise_common::{Category, CoverageType, ToI128Checked, DEFAULT_PAGE_LIMIT};
 
 // Storage TTL constants
 const DAY_IN_LEDGERS: u32 = 17280;
@@ -145,7 +147,10 @@ pub struct InsuranceReport {
     pub data_availability: DataAvailability,
 }
 
-/// Family spending report
+/// Family spending report aggregated from the configured `family_wallet` dependency.
+///
+/// See `reporting/docs/FAMILY_SPENDING_REPORT.md` for the full schema and
+/// `DataAvailability` degradation rules.
 #[contracttype]
 #[derive(Clone)]
 pub struct FamilySpendingReport {
@@ -252,6 +257,8 @@ pub enum ReportingError {
     InvalidPeriod = 7,
     /// Invalid percentage split summing to > 100 or != 100
     InvalidPercentageSplit = 8,
+    /// u64 to u32 overflow guard
+    Overflow = 9,
 }
 
 #[contracttype]
@@ -992,22 +999,22 @@ impl ReportingContract {
         let mut split_amounts = Vec::new(env);
         if availability == DataAvailability::Complete {
             let mut sum = 0u32;
-            // Percentages are whole-number percents that must sum to 100 (100 = 100%)
+            // Percentages are basis points that must sum to 10_000 (10000 = 100.00%)
             for i in 0..split_percentages.len() {
                 let p = split_percentages.get(i).unwrap_or(0);
                 sum = sum
                     .checked_add(p)
                     .ok_or(ReportingError::InvalidPercentageSplit)?;
-                if sum > 100 {
+                if sum > 10_000 {
                     return Err(ReportingError::InvalidPercentageSplit);
                 }
 
-                // Formula used is (amount * percentage) / 100
-                let amount = total_amount.checked_mul(p as i128).unwrap_or(0) / 100;
+                // Percentages are basis points; divide by 10_000 (100.00%).
+                let amount = total_amount.checked_mul(p as i128).unwrap_or(0) / 10_000;
                 split_amounts.push_back(amount);
             }
 
-            if sum != 100 {
+            if sum != 10_000 {
                 return Err(ReportingError::InvalidPercentageSplit);
             }
         }
@@ -1023,6 +1030,7 @@ impl ReportingContract {
         for (i, &category) in categories.iter().enumerate() {
             let amount = split_amounts.get(i as u32).unwrap_or(0);
             let percentage = split_percentages.get(i as u32).unwrap_or(0);
+            // Safe conversion guards for any u64 -> u32 casts used elsewhere (none here)
             breakdown.push_back(CategoryBreakdown {
                 category,
                 amount,
@@ -1084,7 +1092,9 @@ impl ReportingContract {
             }
         }
 
-        let completion_percentage = safe_percent(total_saved, total_target, 100).min(100) as u32;
+        let completion_percentage = safe_percent(total_saved, total_target, 100).min(100);
+        let completion_percentage =
+            u64_to_u32(completion_percentage as u64).map_err(|_| ReportingError::Overflow)?;
 
         Ok(SavingsReport {
             total_goals,
@@ -1160,9 +1170,11 @@ impl ReportingContract {
         }
 
         let compliance_percentage = if total_bills == 0 {
-            100
+            100u32
         } else {
-            safe_percent(paid_bills as i128, total_bills as i128, 100).clamp(0, 100) as u32
+            let val: i128 =
+                safe_percent(paid_bills as i128, total_bills as i128, 100).clamp(0, 100);
+            u64_to_u32(val as u64).map_err(|_| ReportingError::Overflow)?
         };
 
         Ok(BillComplianceReport {
@@ -1229,8 +1241,11 @@ impl ReportingContract {
         }
 
         let annual_premium = monthly_premium.saturating_mul(12);
-        let coverage_to_premium_ratio =
-            safe_percent(total_coverage, annual_premium, 100).clamp(0, u32::MAX as i128) as u32;
+        let coverage_to_premium_ratio = {
+            let val: i128 =
+                safe_percent(total_coverage, annual_premium, 100).clamp(0, u32::MAX as i128);
+            u64_to_u32(val as u64).map_err(|_| ReportingError::Overflow)?
+        };
 
         Ok(InsuranceReport {
             active_policies,
@@ -1246,12 +1261,31 @@ impl ReportingContract {
 
     /// Generate a family-wallet spending report.
     ///
-    /// Reads the configured `family_wallet` dependency to enumerate members and
-    /// fetch each member's current `SpendingTracker`, returning a per-member
-    /// breakdown plus aggregate totals. When the family wallet is unreachable
-    /// the report degrades to `DataAvailability::Missing`; when only part of
-    /// the dependency data can be read the report degrades to
-    /// `DataAvailability::Partial`.
+    /// Reads the configured `family_wallet` dependency via [`FamilyWalletClient`]
+    /// to enumerate members (`get_member_addresses_page`) and fetch each member's
+    /// current [`SpendingTracker`] (`get_spending_tracker`), returning a per-member
+    /// breakdown plus aggregate totals.
+    ///
+    /// # Aggregation
+    ///
+    /// - Members are paged with [`DEP_PAGE_LIMIT`] and deduplicated by address.
+    /// - `total_spending` sums `SpendingTracker.current_spent` using checked
+    ///   arithmetic; overflow saturates and marks the report `Partial`.
+    /// - `average_per_member` is `total_spending / total_members`, or `0` when
+    ///   there are no members (divide-by-zero safe).
+    ///
+    /// # DataAvailability degradation
+    ///
+    /// | Value | Condition |
+    /// |---|---|
+    /// | `Complete` | All member pages drained and every spending read succeeded (or returned `None`). |
+    /// | `Partial` | Member paging hit [`MAX_DEP_PAGES`], a mid-pagination call failed after at least one page, a spending tracker read failed, or total spending overflowed. |
+    /// | `Missing` | The first member page is empty, or the family wallet is unreachable on the first fetch. |
+    ///
+    /// # Errors
+    ///
+    /// - `InvalidPeriod` when `period_start > period_end`.
+    /// - `AddressesNotConfigured` when dependency addresses have not been set.
     pub fn get_family_spending_report(
         env: Env,
         _caller: Address,
@@ -1473,8 +1507,8 @@ impl ReportingContract {
             // Safe division: multiply first, then divide to maintain precision
             // (saved * 100) / target, but avoid intermediate overflow
             let saved_scaled = total_saved.saturating_mul(100);
-            let progress = saved_scaled.checked_div(total_target).unwrap_or(0) as u32;
-            progress.min(100)
+            let progress = saved_scaled.checked_div(total_target).unwrap_or(0);
+            u64_to_u32(progress as u64).unwrap_or(0).min(100)
         };
 
         // Convert percentage to score: (progress * 40) / 100
@@ -2030,6 +2064,11 @@ impl ReportingContract {
 
     /// Get archived reports for a user — **DEPRECATED**.
     ///
+    /// EOL: This entrypoint is deprecated as of v0.2.0 and is planned for removal in a
+    /// future contract release after the migration window. Downstream callers should
+    /// migrate to [`ReportingContract::get_archived_reports_page`] and walk the archive
+    /// by advancing the returned `next_cursor` until it reaches `0`.
+    ///
     /// This entrypoint is **deprecated** as of v0.2.0 and is preserved only for
     /// backwards compatibility. It is now internally bounded to the first
     /// `DEFAULT_PAGE_LIMIT` (20) entries of the user's archive — it no longer
@@ -2067,6 +2106,9 @@ impl ReportingContract {
     }
 
     /// Get a paginated list of archived reports for a user.
+    ///
+    /// See [`docs/PAGINATION_HANDBOOK.md`](../../docs/PAGINATION_HANDBOOK.md) for the invariants
+    /// all paginated reads must satisfy, cursor semantics, and the reviewer checklist.
     ///
     /// This is the supported entrypoint for reading the archive — see the
     /// deprecation note on [`ReportingContract::get_archived_reports`].
@@ -2212,7 +2254,9 @@ impl ReportingContract {
                 // Update index
                 if let Some(mut user_idx) = arch_idx.get(user.clone()) {
                     if let Some(idx) = user_idx.iter().position(|k| k == period_key) {
-                        user_idx.remove(idx as u32);
+                        let idx_u32 =
+                            u64_to_u32(idx as u64).map_err(|_| ReportingError::Overflow)?;
+                        user_idx.remove(idx_u32);
                         if user_idx.is_empty() {
                             arch_idx.remove(user);
                         } else {
@@ -2332,3 +2376,6 @@ mod tests_data_availability;
 
 #[cfg(test)]
 mod tests_archived_pagination_bound;
+
+#[cfg(test)]
+mod tests_safe_math;

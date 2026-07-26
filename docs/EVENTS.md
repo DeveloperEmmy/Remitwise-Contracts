@@ -5,6 +5,7 @@ This document defines the complete event schema for all Remitwise smart contract
 **Version:** 1.0  
 **Last Updated:** 2026-02-25  
 **Compatibility:** Soroban SDK v21+
+**Versioning:** See [Event Versioning ADR](events-versioning.md)
 
 ---
 
@@ -51,6 +52,7 @@ env.events().publish((contract_name, event_category), event_data);
 **Emitted by:** `pay_bill`, `batch_pay_bills`
 
 **Data Structure:**
+
 ```rust
 pub struct BillPaidEvent {
     pub bill_id: u32,               // ID of paid bill
@@ -68,6 +70,7 @@ pub struct BillPaidEvent {
 **Emitted by:** `cancel_bill`
 
 **Data Structure:**
+
 ```rust
 pub struct BillCancelledEvent {
     pub bill_id: u32,               // ID of cancelled bill
@@ -84,6 +87,7 @@ pub struct BillCancelledEvent {
 **Emitted by:** `set_external_ref`
 
 **Data Structure:**
+
 ```rust
 pub struct BillExternalRefUpdatedEvent {
     pub bill_id: u32,               // ID of updated bill
@@ -100,6 +104,7 @@ pub struct BillExternalRefUpdatedEvent {
 **Emitted by:** `archive_paid_bills`
 
 **Data Structure:**
+
 ```rust
 pub struct BillsArchivedEvent {
     pub count: u32,                 // Number of bills archived
@@ -115,6 +120,7 @@ pub struct BillsArchivedEvent {
 **Emitted by:** `restore_bill`
 
 **Data Structure:**
+
 ```rust
 pub struct BillRestoredEvent {
     pub bill_id: u32,               // ID of restored bill
@@ -126,9 +132,21 @@ pub struct BillRestoredEvent {
 ### Event: Contract Paused/Unpaused
 
 **Topic:** `"Remitwise"` (category: System, priority: High)  
-**Action Symbol:** `"paused"` or `"unpaused"`
+**Action Symbol:** `"paused_v2"` or `"unpaused_v2"`
 
-**Data:** Empty tuple `()`
+**Data Structure:**
+
+```rust
+pub struct PauseEvent {
+    pub paused_at: u64,
+    pub paused_by: Address,
+}
+
+pub struct UnpauseEvent {
+    pub unpaused_at: u64,
+    pub unpaused_by: Address,
+}
+```
 
 ### Event: Contract Upgraded
 
@@ -136,6 +154,7 @@ pub struct BillRestoredEvent {
 **Action Symbol:** `"upgraded"`
 
 **Data Structure:**
+
 ```rust
 pub struct VersionUpgradeEvent {
     pub previous_version: u32,      // Previous contract version
@@ -149,6 +168,7 @@ pub struct VersionUpgradeEvent {
 **Emitted by:** `create_bill_schedule`
 
 **Data Structure:**
+
 ```rust
 pub tuple (
     pub schedule_id: u32,           // New schedule ID
@@ -162,6 +182,7 @@ pub tuple (
 **Emitted by:** `modify_bill_schedule`
 
 **Data Structure:**
+
 ```rust
 pub tuple (
     pub schedule_id: u32,           // Modified schedule ID
@@ -174,6 +195,7 @@ pub tuple (
 **Emitted by:** `cancel_bill_schedule`
 
 **Data Structure:**
+
 ```rust
 pub tuple (
     pub schedule_id: u32,           // Cancelled schedule ID
@@ -186,6 +208,7 @@ pub tuple (
 **Emitted by:** `execute_due_bill_schedules`
 
 **Data Structure:**
+
 ```rust
 pub tuple (
     pub schedule_id: u32,           // Executed schedule ID
@@ -198,6 +221,7 @@ pub tuple (
 **Emitted by:** `execute_due_bill_schedules`
 
 **Data Structure:**
+
 ```rust
 pub tuple (
     pub schedule_id: u32,           // Schedule ID
@@ -218,6 +242,7 @@ pub tuple (
 **Secondary Topic:** `("savings", SavingsEvent::GoalCreated)`
 
 **Data Structure:**
+
 ```rust
 pub struct GoalCreatedEvent {
     pub goal_id: u32,               // Unique goal ID
@@ -232,6 +257,7 @@ pub struct GoalCreatedEvent {
 ```
 
 **Example Event:**
+
 ```json
 {
   "goal_id": 1,
@@ -251,6 +277,7 @@ pub struct GoalCreatedEvent {
 **Secondary Topic:** `("savings", SavingsEvent::FundsAdded)`
 
 **Data Structure:**
+
 ```rust
 pub struct FundsAddedEvent {
     pub goal_id: u32,               // Goal ID
@@ -262,6 +289,7 @@ pub struct FundsAddedEvent {
 ```
 
 **Example Event:**
+
 ```json
 {
   "goal_id": 1,
@@ -273,33 +301,35 @@ pub struct FundsAddedEvent {
 ```
 
 ### Event: Goal Completed
- 
- **Topic:** `"completed"` (primary)  
+
+**Topic:** `"completed"` (primary)  
  **Secondary Topic:** `("savings", SavingsEvent::GoalCompleted)`
- 
- **Data Structure:**
- ```rust
- pub struct GoalCompletedEvent {
-     pub goal_id: u32,               // Goal ID
-     pub owner: Address,             // Goal owner
-     pub amount: i128,               // Final contribution amount
-     pub new_total: i128,            // Total amount reached
-     pub name: String,               // Goal name
-     pub timestamp: u64,             // Event timestamp
- }
- ```
- 
- **Example Event:**
- ```json
- {
-   "goal_id": 1,
-   "owner": "G...",
-   "amount": 5000,
-   "new_total": 50000,
-   "name": "Emergency Fund",
-   "timestamp": 1234567860
- }
- ```
+
+**Data Structure:**
+
+```rust
+pub struct GoalCompletedEvent {
+    pub goal_id: u32,               // Goal ID
+    pub owner: Address,             // Goal owner
+    pub amount: i128,               // Final contribution amount
+    pub new_total: i128,            // Total amount reached
+    pub name: String,               // Goal name
+    pub timestamp: u64,             // Event timestamp
+}
+```
+
+**Example Event:**
+
+```json
+{
+  "goal_id": 1,
+  "owner": "G...",
+  "amount": 5000,
+  "new_total": 50000,
+  "name": "Emergency Fund",
+  "timestamp": 1234567860
+}
+```
 
 ### `GoalCompletedEvent` (`SavingsEvent::GoalCompleted`)
 
@@ -311,7 +341,7 @@ pub struct FundsAddedEvent {
 **Fields:**
 
 | Field          | Type     | Description                              |
-|----------------|----------|------------------------------------------|
+| -------------- | -------- | ---------------------------------------- |
 | `goal_id`      | `u32`    | Unique identifier of the completed goal  |
 | `name`         | `String` | Name of the savings goal                 |
 | `final_amount` | `i128`   | Total amount at time of completion       |
@@ -324,37 +354,40 @@ subsequent contributions. Downstream indexers and notification services
 can rely on receiving this event at most once per goal.
 
 ### Event: Funds Withdrawn
- 
- **Topic:** `"withdrawn"` (primary)
- **Secondary Topic:** `("savings", SavingsEvent::FundsWithdrawn)`
- 
- **Data Structure:**
- ```rust
- pub struct FundsWithdrawnEvent {
-     pub goal_id: u32,               // Goal ID
-     pub owner: Address,             // Goal owner
-     pub amount: i128,               // Amount withdrawn
-     pub new_total: i128,            // New total remaining in goal
-     pub timestamp: u64,             // Event timestamp
- }
- ```
- 
- **Example Event:**
- ```json
- {
-   "goal_id": 1,
-   "owner": "G...",
-   "amount": 2000,
-   "new_total": 13000,
-   "timestamp": 1234567900
- }
- ```
+
+**Topic:** `"withdrawn"` (primary)
+**Secondary Topic:** `("savings", SavingsEvent::FundsWithdrawn)`
+
+**Data Structure:**
+
+```rust
+pub struct FundsWithdrawnEvent {
+    pub goal_id: u32,               // Goal ID
+    pub owner: Address,             // Goal owner
+    pub amount: i128,               // Amount withdrawn
+    pub new_total: i128,            // New total remaining in goal
+    pub timestamp: u64,             // Event timestamp
+}
+```
+
+**Example Event:**
+
+```json
+{
+  "goal_id": 1,
+  "owner": "G...",
+  "amount": 2000,
+  "new_total": 13000,
+  "timestamp": 1234567900
+}
+```
 
 ### Event: Goal Locked/Unlocked
 
 **Topic:** `("savings", SavingsEvent::GoalLocked)` or `("savings", SavingsEvent::GoalUnlocked)`
 
 **Data Structure:**
+
 ```rust
 pub struct GoalLockEvent {
     pub goal_id: u32,               // Goal ID
@@ -368,6 +401,7 @@ pub struct GoalLockEvent {
 **Topic:** `("savings", SavingsEvent::ScheduleCreated)`
 
 **Data Structure:**
+
 ```rust
 pub struct SavingsScheduleCreatedEvent {
     pub schedule_id: u32,           // Schedule ID
@@ -384,6 +418,7 @@ pub struct SavingsScheduleCreatedEvent {
 **Topic:** `("savings", "upgraded")`
 
 **Data Structure:**
+
 ```rust
 pub struct VersionUpgradeEvent {
     pub previous_version: u32,
@@ -404,6 +439,7 @@ pub struct VersionUpgradeEvent {
 **Secondary Topic:** `("insure", InsuranceEvent::PolicyCreated)`
 
 **Data Structure:**
+
 ```rust
 pub struct PolicyCreatedEvent {
     pub policy_id: u32,             // Unique policy ID
@@ -416,6 +452,7 @@ pub struct PolicyCreatedEvent {
 ```
 
 **Example Event:**
+
 ```json
 {
   "policy_id": 1,
@@ -433,6 +470,7 @@ pub struct PolicyCreatedEvent {
 **Secondary Topic:** `("Remitwise", EventCategory::Transaction, EventPriority::Low, "paid")`
 
 **Data Structure:**
+
 ```rust
 pub struct PremiumPaidEvent {
     pub policy_id: u32,             // Policy ID
@@ -444,11 +482,13 @@ pub struct PremiumPaidEvent {
 ```
 
 **Cadence Rule:**
+
 - Fixed 30-day cadence (`30 * 86_400` seconds).
 - `pay_premium` and `batch_pay_premiums` both advance per-policy due dates.
 - Late payments always produce `next_payment_date` strictly in the future.
 
 **Example Event:**
+
 ```json
 {
   "policy_id": 1,
@@ -465,8 +505,24 @@ pub struct PremiumPaidEvent {
 **Secondary Topic:** `("insure", InsuranceEvent::PolicyDeactivated)`
 
 **Data Structure:**
+
 ```rust
 pub struct PolicyDeactivatedEvent {
+    pub policy_id: u32,             // Policy ID
+    pub name: String,               // Policy name
+    pub timestamp: u64,             // Event timestamp
+}
+```
+
+### Event: Policy Reactivated
+
+**Topic:** `"reactivated"` (primary)  
+**Secondary Topic:** `("insure", InsuranceEvent::PolicyReactivated)`
+
+**Data Structure:**
+
+```rust
+pub struct PolicyReactivatedEvent {
     pub policy_id: u32,             // Policy ID
     pub name: String,               // Policy name
     pub timestamp: u64,             // Event timestamp
@@ -478,6 +534,7 @@ pub struct PolicyDeactivatedEvent {
 **Topic:** `("insure", InsuranceEvent::ScheduleCreated)`
 
 **Data Structure:**
+
 ```rust
 pub struct PremiumScheduleCreatedEvent {
     pub schedule_id: u32,           // Schedule ID
@@ -493,6 +550,7 @@ pub struct PremiumScheduleCreatedEvent {
 **Topic:** `("insure", InsuranceEvent::ScheduleExecuted)`
 
 **Data Structure:**
+
 ```rust
 pub struct ScheduleExecutedEvent {
     pub schedule_id: u32,           // Schedule ID
@@ -507,6 +565,7 @@ pub struct ScheduleExecutedEvent {
 **Topic:** `("insure", InsuranceEvent::ScheduleMissed)`
 
 **Data Structure:**
+
 ```rust
 pub struct ScheduleMissedEvent {
     pub schedule_id: u32,           // Schedule ID
@@ -521,6 +580,7 @@ pub struct ScheduleMissedEvent {
 **Topic:** `("insure", "upgraded")`
 
 **Data Structure:**
+
 ```rust
 pub struct VersionUpgradeEvent {
     pub previous_version: u32,
@@ -541,6 +601,7 @@ pub struct VersionUpgradeEvent {
 **Secondary Topic:** `("split", SplitEvent::Initialized)`
 
 **Data Structure:**
+
 ```rust
 pub struct SplitInitializedEvent {
     pub spending_percent: u32,      // Spending allocation percentage (0-100)
@@ -554,6 +615,7 @@ pub struct SplitInitializedEvent {
 **Constraint:** `spending_percent + savings_percent + bills_percent + insurance_percent == 100`
 
 **Example Event:**
+
 ```json
 {
   "spending_percent": 50,
@@ -570,6 +632,7 @@ pub struct SplitInitializedEvent {
 **Secondary Topic:** `("split", SplitEvent::Calculated)`
 
 **Data Structure:**
+
 ```rust
 pub struct SplitCalculatedEvent {
     pub total_amount: i128,         // Total amount to split
@@ -584,6 +647,7 @@ pub struct SplitCalculatedEvent {
 **Constraint:** `spending_amount + savings_amount + bills_amount + insurance_amount == total_amount`
 
 **Example Event:**
+
 ```json
 {
   "total_amount": 10000,
@@ -592,6 +656,47 @@ pub struct SplitCalculatedEvent {
   "bills_amount": 1500,
   "insurance_amount": 500,
   "timestamp": 1234567850
+}
+```
+
+### Event: Distribution Completed
+
+**Topic:** `("Remitwise", EventCategory::Transaction, EventPriority::Medium, "dist_ok")` (backward-compat unstructured)  
+**Secondary Topic:** `("split", SplitEvent::DistributionCompleted)` (structured per-category payload)
+
+**Emitted by:** `distribute_usdc`, `distribute_usdc_hashed`  
+**Trigger:** Emitted when all category transfers complete successfully
+
+Both entrypoints call the shared `emit_distribution_completed` helper so category-level
+amounts cannot drift between the legacy and request-hash-bound paths.
+
+**Data Structure:**
+
+```rust
+pub struct DistributionCompletedEvent {
+    pub from: Address,              // Payer address
+    pub total_amount: i128,         // Total distributed amount
+    pub spending_amount: i128,      // Amount sent to spending account
+    pub savings_amount: i128,       // Amount sent to savings account
+    pub bills_amount: i128,         // Amount sent to bills account
+    pub insurance_amount: i128,     // Amount sent to insurance account (includes dust/remainder)
+    pub timestamp: u64,             // Event timestamp
+}
+```
+
+**Constraint:** `spending_amount + savings_amount + bills_amount + insurance_amount == total_amount`
+
+**Example Event:**
+
+```json
+{
+  "from": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+  "total_amount": 10000,
+  "spending_amount": 5000,
+  "savings_amount": 3000,
+  "bills_amount": 1500,
+  "insurance_amount": 500,
+  "timestamp": 1234567900
 }
 ```
 
@@ -606,6 +711,7 @@ pub struct SplitCalculatedEvent {
 **Topic:** `("schedule", ScheduleEvent::Created)`
 
 **Data Structure:**
+
 ```rust
 pub struct RemittanceScheduleCreatedEvent {
     pub schedule_id: u32,           // Schedule ID
@@ -622,6 +728,7 @@ pub struct RemittanceScheduleCreatedEvent {
 **Topic:** `("schedule", ScheduleEvent::Executed)`
 
 **Data Structure:**
+
 ```rust
 pub struct ScheduleExecutedEvent {
     pub schedule_id: u32,           // Schedule ID
@@ -635,6 +742,7 @@ pub struct ScheduleExecutedEvent {
 **Topic:** `("schedule", ScheduleEvent::Modified)`
 
 **Data Structure:**
+
 ```rust
 pub struct ScheduleModifiedEvent {
     pub schedule_id: u32,           // Schedule ID
@@ -649,6 +757,7 @@ pub struct ScheduleModifiedEvent {
 **Topic:** `("schedule", ScheduleEvent::Cancelled)`
 
 **Data Structure:**
+
 ```rust
 pub struct ScheduleCancelledEvent {
     pub schedule_id: u32,           // Schedule ID
@@ -661,6 +770,7 @@ pub struct ScheduleCancelledEvent {
 **Topic:** `("split", "sch_exec")`
 
 **Data Structure:**
+
 ```rust
 pub tuple (
     pub schedule_id: u32,           // Schedule ID that was executed
@@ -673,6 +783,7 @@ pub tuple (
 and indexing purposes. The actual distribution is still performed separately via `distribute_usdc`.
 
 **Security Notes:**
+
 - Emitted only after `last_executed` is set, ensuring idempotency.
 - Emitted even if the schedule is one-off and becomes inactive after execution.
 - Permissionless executor ensures this event is auditable on-chain without requiring owner authorization.
@@ -682,6 +793,7 @@ and indexing purposes. The actual distribution is still performed separately via
 **Topic:** `("split", "sch_miss")`
 
 **Data Structure:**
+
 ```rust
 pub tuple (
     pub schedule_id: u32,           // Schedule ID
@@ -694,6 +806,7 @@ pub tuple (
 not executed for 3 intervals, `missed_count = 3` and this event is emitted.
 
 **Drift Handling:**
+
 - Indicates delayed executor runs or network congestion.
 - Allows off-chain systems to detect and respond to drift.
 - `next_due` is advanced past all missed intervals, so the schedule "catches up."
@@ -709,6 +822,7 @@ not executed for 3 intervals, `missed_count = 3` and this event is emitted.
 **Topic:** `("split", "upgraded")`
 
 **Data Structure:**
+
 ```rust
 pub struct VersionUpgradeEvent {
     pub previous_version: u32,
@@ -728,6 +842,7 @@ pub struct VersionUpgradeEvent {
 **Topic:** `("family", "member_added")`
 
 **Data Structure:**
+
 ```rust
 pub struct MemberAddedEvent {
     pub member: Address,            // Member address
@@ -742,6 +857,7 @@ pub struct MemberAddedEvent {
 **Topic:** `("family", "limit_updated")`
 
 **Data Structure:**
+
 ```rust
 pub struct SpendingLimitUpdatedEvent {
     pub member: Address,            // Member address
@@ -756,6 +872,7 @@ pub struct SpendingLimitUpdatedEvent {
 **Topic:** `("family", "tx_proposed")`
 
 **Data Structure:**
+
 ```rust
 pub struct TransactionProposedEvent {
     pub tx_id: u64,                 // Transaction ID
@@ -770,6 +887,7 @@ pub struct TransactionProposedEvent {
 **Topic:** `("family", "tx_executed")`
 
 **Data Structure:**
+
 ```rust
 pub struct TransactionExecutedEvent {
     pub tx_id: u64,                 // Transaction ID
@@ -783,6 +901,7 @@ pub struct TransactionExecutedEvent {
 **Topic:** `("family", "emergency_on")`
 
 **Data Structure:**
+
 ```rust
 pub struct EmergencyModeEvent {
     pub activated_by: Address,      // Address that activated emergency mode
@@ -795,6 +914,7 @@ pub struct EmergencyModeEvent {
 **Topic:** `("family", "emergency_off")`
 
 **Data Structure:**
+
 ```rust
 pub struct EmergencyModeEvent {
     pub deactivated_by: Address,    // Address that deactivated emergency mode
@@ -814,6 +934,7 @@ duplicate signer, non-member signer, oversized signer list, paused wallet,
 negative spending limit, etc.) returns an `Error` and emits nothing.
 
 **Data Structure:**
+
 ```rust
 pub struct MultisigConfiguredEvent {
     pub tx_type: TransactionType,   // Which TransactionType bucket was configured
@@ -848,6 +969,26 @@ state transition in the wallet.
 > audit or event emission. See
 > [docs/orchestrator-deadline-window.md](docs/orchestrator-deadline-window.md).
 
+#### Signed remittance request hash
+
+`execute_remittance_flow_signed` validates a caller-supplied `request_hash` against
+`compute_request_hash` before executing the fan-out. The hash binds:
+
+| Field       | Description                                                       |
+| ----------- | ----------------------------------------------------------------- |
+| `operation` | Fixed symbol `flow`                                               |
+| `nonce`     | Per-executor sequential counter                                   |
+| `amount`    | Total remittance amount                                           |
+| `deadline`  | Ledger timestamp upper bound (see deadline window doc)            |
+| `goal_id`   | Savings goal ID from instance storage (`GOAL_ID`, default `1`)    |
+| `bill_id`   | Bill ID from instance storage (`BILL_ID`, default `1`)            |
+| `policy_id` | Insurance policy ID from instance storage (`POL_ID`, default `1`) |
+
+Relayers must query the orchestrator for the current `goal_id` / `bill_id` /
+`policy_id` before signing. Tampering with any bound field after signing yields
+`InvalidNonce`. Both entrypoints share the same downstream fan-out via
+`run_remittance_fan_out` in `orchestrator/src/lib.rs`.
+
 ### Event: Flow Started
 
 **Topic:** `("Remitwise", EventCategory::Transaction, EventPriority::High, "flow")`  
@@ -855,6 +996,7 @@ state transition in the wallet.
 **Trigger:** Emitted when a remittance flow execution begins after passing validation checks
 
 **Data Structure:**
+
 ```rust
 pub struct FlowStartedEvent {
     pub executor: Address,     // Address executing the flow
@@ -863,6 +1005,7 @@ pub struct FlowStartedEvent {
 ```
 
 **Example Event:**
+
 ```json
 {
   "executor": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
@@ -877,6 +1020,7 @@ pub struct FlowStartedEvent {
 **Trigger:** Emitted when a remittance flow completes successfully
 
 **Data Structure:**
+
 ```rust
 pub struct FlowCompletedEvent {
     pub executor: Address,     // Address that executed the flow
@@ -885,6 +1029,7 @@ pub struct FlowCompletedEvent {
 ```
 
 **Example Event:**
+
 ```json
 {
   "executor": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
@@ -899,6 +1044,7 @@ pub struct FlowCompletedEvent {
 **Trigger:** Emitted when a remittance flow execution fails
 
 **Data Structure:**
+
 ```rust
 pub struct FlowFailedEvent {
     pub executor: Address,     // Address that attempted the flow
@@ -907,6 +1053,7 @@ pub struct FlowFailedEvent {
 ```
 
 **Example Event:**
+
 ```json
 {
   "executor": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
@@ -915,6 +1062,7 @@ pub struct FlowFailedEvent {
 ```
 
 **Error Codes:**
+
 ```rust
 pub enum OrchestratorError {
     Unauthorized = 1,
@@ -940,6 +1088,7 @@ pub enum OrchestratorError {
 **Trigger:** Emitted when the orchestrator contract is successfully initialized
 
 **Data Structure:**
+
 ```rust
 pub struct InitCompletedEvent {
     pub caller: Address,       // Address that initialized the contract
@@ -947,6 +1096,7 @@ pub struct InitCompletedEvent {
 ```
 
 **Example Event:**
+
 ```json
 {
   "caller": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -960,6 +1110,7 @@ pub struct InitCompletedEvent {
 **Trigger:** Emitted when the contract version is upgraded by the owner
 
 **Data Structure:**
+
 ```rust
 pub struct VersionUpgradeEvent {
     pub previous_version: u32, // Previous contract version
@@ -968,14 +1119,15 @@ pub struct VersionUpgradeEvent {
 ```
 
 **Example Event:**
-```json
+
+````json
 {
   "previous_version": 1,
   "new_version": 2
 }
 ```## Reporting Contract
 
-**Contract Name:** `reporting`  
+**Contract Name:** `reporting`
 **Primary Topic Prefix:** `"reporting"`
 
 ### Event: Report Generated
@@ -990,13 +1142,14 @@ pub struct ReportGeneratedEvent {
     pub period_key: u64,            // Period identifier
     pub timestamp: u64,             // Event timestamp
 }
-```
+````
 
 ### Event: Report Stored
 
 **Topic:** `("reporting", ReportEvent::ReportStored)`
 
 **Data Structure:**
+
 ```rust
 pub struct ReportStoredEvent {
     pub user: Address,              // User address
@@ -1011,6 +1164,7 @@ pub struct ReportStoredEvent {
 **Topic:** `("reporting", ReportEvent::AddressesConfigured)`
 
 **Data Structure:**
+
 ```rust
 pub struct AddressesConfiguredEvent {
     pub configured_by: Address,     // Address that configured
@@ -1023,6 +1177,7 @@ pub struct AddressesConfiguredEvent {
 **Topic:** `("reporting", ReportEvent::ReportsArchived)`
 
 **Data Structure:**
+
 ```rust
 pub struct ReportsArchivedEvent {
     pub count: u32,                 // Number of reports archived
@@ -1039,6 +1194,7 @@ pub struct ReportsArchivedEvent {
 Each contract maintains a version number that can be queried via `get_version()`. Version changes are emitted as upgrade events.
 
 **Current Versions:**
+
 - Bill Payments: v1
 - Savings Goals: v1
 - Insurance: v1
@@ -1050,12 +1206,14 @@ Each contract maintains a version number that can be queried via `get_version()`
 ### Event Format Stability
 
 **Backward Compatibility Guarantees:**
+
 - Event topics (primary and secondary) are immutable
 - Event data structures are append-only (new fields added at the end)
 - Existing fields maintain their type and position
 - Deprecated fields are marked but not removed
 
 **Breaking Changes:**
+
 - Major version bumps indicate potential event schema changes
 - Indexers should monitor `upgraded` events for version changes
 - Contract upgrades are announced via `set_version()` calls
@@ -1068,6 +1226,7 @@ that need one aggregate record instead of one event per item.
 **Topic:** `("Remitwise", EventCategory::<category>, EventPriority::Low, "batch")`
 
 **Encoded Topic Values:**
+
 - `EventCategory::Transaction` = `0`
 - `EventCategory::State` = `1`
 - `EventCategory::Alert` = `2`
@@ -1087,6 +1246,7 @@ responsible for applying any business-level batch-size limits before emitting.
 ### Migration Path
 
 When upgrading contracts:
+
 1. New event types are added with new topic symbols
 2. Old event types continue to be emitted for backward compatibility
 3. Indexers can subscribe to both old and new topics during transition period
@@ -1115,23 +1275,23 @@ cargo test --workspace events_schema_test
 
 Per-contract:
 
-| Contract | Test module |
-|----------|-------------|
-| `bill_payments` | [bill_payments/src/events_schema_test.rs](bill_payments/src/events_schema_test.rs) |
-| `family_wallet` | [family_wallet/src/events_schema_test.rs](family_wallet/src/events_schema_test.rs) |
+| Contract           | Test module                                                                              |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| `bill_payments`    | [bill_payments/src/events_schema_test.rs](bill_payments/src/events_schema_test.rs)       |
+| `family_wallet`    | [family_wallet/src/events_schema_test.rs](family_wallet/src/events_schema_test.rs)       |
 | `remittance_split` | [remittance_split/src/events_schema_test.rs](remittance_split/src/events_schema_test.rs) |
-| `reporting` | [reporting/src/events_schema_test.rs](reporting/src/events_schema_test.rs) |
-| `savings_goals` | [savings_goals/src/events_schema_test.rs](savings_goals/src/events_schema_test.rs) |
-| `orchestrator` | [orchestrator/src/events_schema_test.rs](orchestrator/src/events_schema_test.rs) |
-| `remitwise-common` | [remitwise-common/src/lib.rs](remitwise-common/src/lib.rs) |
+| `reporting`        | [reporting/src/events_schema_test.rs](reporting/src/events_schema_test.rs)               |
+| `savings_goals`    | [savings_goals/src/events_schema_test.rs](savings_goals/src/events_schema_test.rs)       |
+| `orchestrator`     | [orchestrator/src/events_schema_test.rs](orchestrator/src/events_schema_test.rs)         |
+| `remitwise-common` | [remitwise-common/src/lib.rs](remitwise-common/src/lib.rs)                               |
 
 A failing schema test is the signal that **a change is breaking for indexers**.
 The required workflow is:
 
 1. Bump the contract's major version.
 2. Update `EVENTS.md` to document the old and new shapes side-by-side.
-3. Update the test to reflect the new schema *as a separate commit on top
-   of the version bump*, so reviewers can audit the diff in isolation.
+3. Update the test to reflect the new schema _as a separate commit on top
+   of the version bump_, so reviewers can audit the diff in isolation.
 4. Coordinate with downstream indexer owners before the upgrade event is
    emitted on mainnet.
 
@@ -1142,6 +1302,7 @@ The required workflow is:
 ### Recommended Indexing Strategy
 
 1. **Subscribe to all contract topics:**
+
    ```
    "Remitwise", "savings", "insure", "split", "family", "orchestrator", "reporting"
    ```
@@ -1164,8 +1325,8 @@ The required workflow is:
 ```javascript
 function parseEvent(topics, data) {
   const [primary, ...secondary] = topics;
-  
-  switch(primary) {
+
+  switch (primary) {
     case "Remitwise":
       return parseBillPaymentEvent(secondary, data);
     case "savings":

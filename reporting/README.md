@@ -127,6 +127,11 @@ Generates a full report by querying all sub-contracts.
 #### `get_savings_report(user, period_start, period_end) -> Result<SavingsReport, ReportingError>`
 #### `get_bill_compliance_report(user, period_start, period_end) -> Result<BillComplianceReport, ReportingError>`
 #### `get_insurance_report(user, period_start, period_end) -> Result<InsuranceReport, ReportingError>`
+#### `get_family_spending_report(caller, user, period_start, period_end) -> Result<FamilySpendingReport, ReportingError>`
+Aggregates per-member spending from the configured `family_wallet` dependency.
+See [`docs/FAMILY_SPENDING_REPORT.md`](docs/FAMILY_SPENDING_REPORT.md) for the full
+schema and `DataAvailability` degradation rules.
+
 #### `calculate_health_score(user, total_remittance) -> HealthScore`
 #### `get_trend_analysis(user, current_amount, previous_amount) -> TrendData`
 #### `get_trend_analysis_multi(user, history) -> Vec<TrendData>`

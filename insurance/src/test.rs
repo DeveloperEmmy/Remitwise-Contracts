@@ -3,7 +3,7 @@
 mod tests {
     use crate::*;
     use remitwise_common::CoverageType;
-    use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
+    use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, Env, String, Vec};
 
     fn setup(env: &Env) -> InsuranceClient<'_> {
         let id = env.register_contract(None, Insurance);
@@ -483,6 +483,227 @@ mod tests {
         );
     }
 
+    // ── reactivate_policy tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_reactivate_policy_by_owner_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let owner = Address::generate(&env);
+        let pid = c.create_policy(
+            &owner,
+            &n(&env, "P"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+
+        // Deactivate then reactivate
+        c.deactivate_policy(&owner, &pid);
+        let p = c.get_policy(&pid).unwrap();
+        let old_next = p.next_payment_date;
+
+        assert!(c.reactivate_policy(&owner, &pid));
+
+        let p2 = c.get_policy(&pid).unwrap();
+        assert!(p2.active, "policy should be active after reactivation");
+        // Next payment date should have been refreshed forward
+        assert!(p2.next_payment_date > old_next);
+
+        let page = c.get_active_policies(&owner, &0, &10);
+        assert_eq!(page.count, 1);
+        assert_eq!(page.items.len(), 1);
+    }
+
+    #[test]
+    fn test_reactivate_policy_already_active() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let owner = Address::generate(&env);
+        let pid = c.create_policy(
+            &owner,
+            &n(&env, "P"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+
+        assert_eq!(
+            c.try_reactivate_policy(&owner, &pid).unwrap_err().unwrap(),
+            InsuranceError::PolicyAlreadyActive
+        );
+    }
+
+    #[test]
+    fn test_reactivate_policy_max_reached() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let owner = Address::generate(&env);
+        let pid = c.create_policy(
+            &owner,
+            &n(&env, "P"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+
+        // Deactivate so we can attempt to reactivate
+        c.deactivate_policy(&owner, &pid);
+
+        // Fill the active index to MAX_POLICIES with IDs that don't include pid
+        let mut full = Vec::new(&env);
+        // Start from MAX_POLICIES+1 so we don't collide with pid (which is 1)
+        for i in MAX_POLICIES + 1..=MAX_POLICIES * 2 {
+            full.push_back(i);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ActivePolicies, &full);
+
+        assert_eq!(
+            c.try_reactivate_policy(&owner, &pid).unwrap_err().unwrap(),
+            InsuranceError::MaxPoliciesReached
+        );
+    }
+
+    #[test]
+    fn test_get_deactivated_policies_pagination() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let owner = Address::generate(&env);
+
+        let p1 = c.create_policy(
+            &owner,
+            &n(&env, "P1"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+        let p2 = c.create_policy(
+            &owner,
+            &n(&env, "P2"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+        let p3 = c.create_policy(
+            &owner,
+            &n(&env, "P3"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+        let p4 = c.create_policy(
+            &owner,
+            &n(&env, "P4"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+
+        // Deactivate a subset
+        c.deactivate_policy(&owner, &p2);
+        c.deactivate_policy(&owner, &p4);
+
+        let page = c.get_deactivated_policies(&owner, &0, &10);
+        assert_eq!(page.count, 2);
+        assert_eq!(page.items.len(), 2);
+    }
+
+    // ── MAX_TENURE_SECS expiry boundary tests ─────────────────────────────
+
+    /// Reactivation at exactly MAX_TENURE_SECS after deactivation must succeed.
+    #[test]
+    fn test_reactivate_exactly_at_tenure_boundary_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let owner = Address::generate(&env);
+        let base_time = 1_000_000u64;
+        env.ledger().set_timestamp(base_time);
+
+        let pid = c.create_policy(
+            &owner,
+            &n(&env, "P"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+
+        c.deactivate_policy(&owner, &pid);
+
+        // Advance to exactly MAX_TENURE_SECS after deactivation
+        env.ledger().set_timestamp(base_time + MAX_TENURE_SECS);
+
+        assert!(
+            c.reactivate_policy(&owner, &pid),
+            "reactivation exactly at tenure boundary must succeed"
+        );
+    }
+
+    /// Reactivation one second before MAX_TENURE_SECS elapses must fail.
+    #[test]
+    fn test_reactivate_one_second_before_tenure_boundary_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let owner = Address::generate(&env);
+        let base_time = 1_000_000u64;
+        env.ledger().set_timestamp(base_time);
+
+        let pid = c.create_policy(
+            &owner,
+            &n(&env, "P"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+
+        c.deactivate_policy(&owner, &pid);
+
+        // Advance to one second before tenure expires
+        env.ledger().set_timestamp(base_time + MAX_TENURE_SECS - 1);
+
+        assert_eq!(
+            c.try_reactivate_policy(&owner, &pid).unwrap_err().unwrap(),
+            InsuranceError::PolicyDeactivationTooSoon,
+            "reactivation one second before tenure must fail"
+        );
+    }
+
+    /// Reactivation one second past MAX_TENURE_SECS must succeed.
+    #[test]
+    fn test_reactivate_one_second_past_tenure_boundary_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let owner = Address::generate(&env);
+        let base_time = 1_000_000u64;
+        env.ledger().set_timestamp(base_time);
+
+        let pid = c.create_policy(
+            &owner,
+            &n(&env, "P"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+
+        c.deactivate_policy(&owner, &pid);
+
+        // Advance to one second past tenure expiry
+        env.ledger().set_timestamp(base_time + MAX_TENURE_SECS + 1);
+
+        assert!(
+            c.reactivate_policy(&owner, &pid),
+            "reactivation one second past tenure must succeed"
+        );
+    }
+
     // ── set_external_ref ──────────────────────────────────────────────────────
 
     /// Success path: contract owner can attach a valid external reference.
@@ -814,5 +1035,226 @@ mod tests {
         let result = client.try_pre_upgrade(&stranger);
         assert_eq!(result, Err(Ok(InsuranceError::Unauthorized)));
     }
-}
 
+    // ── batch_pay_premiums deterministic partial-result accounting and atomicity (#1038) ──
+
+    /// Policies belonging to another owner are silently skipped; count reflects only
+    /// the caller's paid premiums — not the total policies in the batch.
+    #[test]
+    fn test_batch_pay_premiums_skips_policies_of_other_owners() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let c = setup(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+
+        let alice_id = c.create_policy(
+            &alice,
+            &n(&env, "Alice Health"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+        let bob_id = c.create_policy(
+            &bob,
+            &n(&env, "Bob Life"),
+            &CoverageType::Life,
+            &10_000_000i128,
+            &100_000_000i128,
+        );
+
+        // Alice submits a batch that includes Bob's policy_id.
+        let mut ids = Vec::new(&env);
+        ids.push_back(alice_id);
+        ids.push_back(bob_id);
+
+        // Only Alice's policy must be paid; Bob's is skipped (owner mismatch).
+        let paid = c.batch_pay_premiums(&alice, &ids);
+        assert_eq!(paid, 1, "only Alice's policy should be counted");
+    }
+
+    /// A batch with duplicate IDs must not double-count or double-update the same policy.
+    #[test]
+    fn test_batch_pay_premiums_duplicate_ids_are_each_processed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let c = setup(&env);
+        let owner = Address::generate(&env);
+
+        let id = c.create_policy(
+            &owner,
+            &n(&env, "Dup Test"),
+            &CoverageType::Health,
+            &5_000_000i128,
+            &50_000_000i128,
+        );
+
+        // Same ID twice — both iterations will process the same policy.
+        // The count must be 2 (each iteration succeeds) and next_payment_date updates twice.
+        let mut ids = Vec::new(&env);
+        ids.push_back(id);
+        ids.push_back(id);
+
+        let paid = c.batch_pay_premiums(&owner, &ids);
+        // Both passes over the same policy succeed (it stays active).
+        assert_eq!(paid, 2, "each iteration of a duplicate ID counts once");
+    }
+
+    /// An empty batch must return 0 and not panic.
+    #[test]
+    fn test_batch_pay_premiums_empty_ids_returns_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let c = setup(&env);
+        let owner = Address::generate(&env);
+
+        let ids = Vec::<u32>::new(&env);
+        let paid = c.batch_pay_premiums(&owner, &ids);
+        assert_eq!(paid, 0, "empty batch must return 0");
+    }
+
+    /// A batch containing a non-existent policy ID must error immediately on that ID.
+    #[test]
+    fn test_batch_pay_premiums_nonexistent_id_returns_policy_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let c = setup(&env);
+        let owner = Address::generate(&env);
+
+        let mut ids = Vec::new(&env);
+        ids.push_back(999u32);
+
+        let err = c.try_batch_pay_premiums(&owner, &ids).unwrap_err().unwrap();
+        assert_eq!(err, InsuranceError::PolicyNotFound);
+    }
+
+    // ── clamp_limit pagination tests for get_deactivated_policies ─────────────
+    //
+    // Three cases lock the pagination-limit normalisation contract used by
+    // `get_deactivated_policies`:
+    //   1. `limit == 0`  → treated as DEFAULT_PAGE_LIMIT (20)
+    //   2. `limit > MAX_PAGE_LIMIT` → clamped to MAX_PAGE_LIMIT (50)
+    //   3. `1 <= limit <= MAX_PAGE_LIMIT` → passes through unchanged
+
+    /// A zero limit must be normalised to DEFAULT_PAGE_LIMIT (20).
+    ///
+    /// Seed 25 deactivated policies so the page is visibly bounded by the
+    /// default rather than by the actual record count.
+    #[test]
+    fn get_deactivated_policies_zero_limit_returns_default_page_limit() {
+        use remitwise_common::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let owner = Address::generate(&env);
+
+        // Create and deactivate 25 policies (> DEFAULT_PAGE_LIMIT=20).
+        let total: u32 = DEFAULT_PAGE_LIMIT + 5;
+        for i in 0..total {
+            let name = String::from_str(&env, &format!("P{}", i));
+            let id = c.create_policy(
+                &owner,
+                &name,
+                &CoverageType::Health,
+                &5_000_000i128,
+                &50_000_000i128,
+            );
+            c.deactivate_policy(&owner, &id);
+        }
+
+        let page = c.get_deactivated_policies(&owner, &0, &0);
+        assert_eq!(
+            page.items.len(),
+            DEFAULT_PAGE_LIMIT,
+            "limit=0 must be normalised to DEFAULT_PAGE_LIMIT={DEFAULT_PAGE_LIMIT}, \
+             not return all {total} records"
+        );
+        assert_eq!(page.count, DEFAULT_PAGE_LIMIT);
+        // More pages exist because total > DEFAULT_PAGE_LIMIT.
+        assert!(
+            page.next_cursor > 0,
+            "next_cursor must be non-zero when more pages remain"
+        );
+        let _ = MAX_PAGE_LIMIT; // keep import used
+    }
+
+    /// An oversized limit must be clamped to MAX_PAGE_LIMIT (50).
+    ///
+    /// Seed 55 deactivated policies so the page is visibly bounded by the
+    /// maximum rather than by the actual record count.
+    #[test]
+    fn get_deactivated_policies_oversized_limit_clamped_to_max_page_limit() {
+        use remitwise_common::MAX_PAGE_LIMIT;
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let owner = Address::generate(&env);
+
+        let total: u32 = MAX_PAGE_LIMIT + 5;
+        for i in 0..total {
+            let name = String::from_str(&env, &format!("P{}", i));
+            let id = c.create_policy(
+                &owner,
+                &name,
+                &CoverageType::Health,
+                &5_000_000i128,
+                &50_000_000i128,
+            );
+            c.deactivate_policy(&owner, &id);
+        }
+
+        let page = c.get_deactivated_policies(&owner, &0, &u32::MAX);
+        assert_eq!(
+            page.items.len(),
+            MAX_PAGE_LIMIT,
+            "limit=u32::MAX must be clamped to MAX_PAGE_LIMIT={MAX_PAGE_LIMIT}"
+        );
+        assert_eq!(page.count, MAX_PAGE_LIMIT);
+        assert!(
+            page.next_cursor > 0,
+            "next_cursor must be non-zero when more pages remain"
+        );
+    }
+
+    /// A limit within [1, MAX_PAGE_LIMIT] must pass through unchanged.
+    #[test]
+    fn get_deactivated_policies_in_range_limit_passes_through_unchanged() {
+        use remitwise_common::MAX_PAGE_LIMIT;
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let (c, _contract_owner) = setup_with_owner(&env);
+        let owner = Address::generate(&env);
+
+        let requested_limit: u32 = 7;
+        assert!(requested_limit >= 1 && requested_limit <= MAX_PAGE_LIMIT);
+
+        // Seed more records than the requested limit.
+        let total: u32 = requested_limit + 3;
+        for i in 0..total {
+            let name = String::from_str(&env, &format!("P{}", i));
+            let id = c.create_policy(
+                &owner,
+                &name,
+                &CoverageType::Health,
+                &5_000_000i128,
+                &50_000_000i128,
+            );
+            c.deactivate_policy(&owner, &id);
+        }
+
+        let page = c.get_deactivated_policies(&owner, &0, &requested_limit);
+        assert_eq!(
+            page.items.len(),
+            requested_limit,
+            "in-range limit={requested_limit} must be returned unmodified"
+        );
+        assert_eq!(page.count, requested_limit);
+        assert!(
+            page.next_cursor > 0,
+            "next_cursor must be non-zero when more pages remain"
+        );
+    }
+}

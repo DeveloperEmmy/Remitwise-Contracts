@@ -5,11 +5,13 @@
 mod events_schema_test;
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod tests_safe_math;
 
 use remitwise_common::{
-    clamp_limit, EventCategory, EventPriority, RemitwiseEvents, INSTANCE_BUMP_AMOUNT,
-    INSTANCE_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT, PERSISTENT_LIFETIME_THRESHOLD,
-    SNAPSHOT_KEY, SNAPSHOT_VERSION,
+    clamp_limit, guard_bytes_len, verify_no_dust, EventCategory, EventPriority,
+    RemitwiseEvents, Timestamp, ToI128Checked, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD,
+    PERSISTENT_BUMP_AMOUNT, PERSISTENT_LIFETIME_THRESHOLD, SNAPSHOT_KEY, SNAPSHOT_VERSION,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token::TokenClient, vec,
@@ -41,9 +43,6 @@ pub enum RemittanceSplitError {
     AlreadyInitialized = 1,
     /// The contract has not been initialized yet; `initialize_split` must be called first.
     NotInitialized = 2,
-    /// One or more split percentages are invalid: either a field exceeds 100 or the four
-    /// fields do not sum to exactly 100.
-    InvalidPercentages = 3,
     InvalidAmount = 4,
     Overflow = 5,
     /// The caller is not authorized to perform this operation.
@@ -79,6 +78,21 @@ pub enum RemittanceSplitError {
     ScheduleIntervalTooShort = 23,
     /// The schedule lead time exceeds the maximum allowed value.
     ScheduleLeadTimeTooLong = 24,
+    /// No pending treasury rotation has been proposed.
+    NoPendingTreasury = 26,
+    /// The caller of `accept_treasury` is not the proposed treasury address.
+    PendingTreasuryMismatch = 27,
+    /// The `Bytes` value about to be returned exceeds `MAX_BYTES_RETURN`.
+    /// Prevents consumers from being forced to deserialise an unbounded payload.
+    ReturnBytesTooLarge = 28,
+    /// No pre-upgrade snapshot exists for restore.
+    SnapshotNotFound = 29,
+    /// The pre-upgrade snapshot is older than the freshness window.
+    SnapshotTooOld = 30,
+    /// The supplied token contract is not a supported stable ingress asset.
+    /// This is a defence-in-depth rejection for rebase/deflationary or otherwise
+    /// incompatible token contracts that would undermine the remittance invariants.
+    UnsupportedTokenContract = 31,
 }
 
 #[derive(Clone)]
@@ -424,8 +438,11 @@ impl RemittanceSplit {
             &env,
             EventCategory::System,
             EventPriority::High,
-            symbol_short!("paused"),
-            (),
+            soroban_sdk::Symbol::new(&env, remitwise_common::events::ACTION_PAUSED_V2),
+            remitwise_common::events::PauseEvent {
+                paused_at: env.ledger().timestamp(),
+                paused_by: caller.clone(),
+            },
         );
         Ok(())
     }
@@ -459,8 +476,11 @@ impl RemittanceSplit {
             &env,
             EventCategory::System,
             EventPriority::High,
-            symbol_short!("unpaused"),
-            (),
+            soroban_sdk::Symbol::new(&env, remitwise_common::events::ACTION_UNPAUSED_V2),
+            remitwise_common::events::UnpauseEvent {
+                unpaused_at: env.ledger().timestamp(),
+                unpaused_by: caller.clone(),
+            },
         );
         Ok(())
     }
@@ -564,6 +584,116 @@ impl RemittanceSplit {
         Self::get_pause_admin(&env)
     }
 
+    // ========== Treasury two-step handshake ==========
+
+    fn get_treasury(env: &Env) -> Option<Address> {
+        env.storage().instance().get(&symbol_short!("TREASURY"))
+    }
+
+    fn get_pending_treasury(env: &Env) -> Option<Address> {
+        env.storage().instance().get(&symbol_short!("TRSR_PEND"))
+    }
+
+    fn set_pending_treasury(env: &Env, treasury: &Address) {
+        env.storage()
+            .instance()
+            .set(&symbol_short!("TRSR_PEND"), treasury);
+    }
+
+    fn clear_pending_treasury(env: &Env) {
+        env.storage().instance().remove(&symbol_short!("TRSR_PEND"));
+    }
+
+    /// Step one of a two-step treasury rotation.
+    ///
+    /// The contract owner proposes a new protocol treasury address. The change
+    /// is NOT applied until the proposed address calls `accept_treasury`, so a
+    /// typo in `propose_treasury` never silently sends funds to a wrong
+    /// address — the owner keeps control until the new treasury actively
+    /// accepts. A pending proposal can be overwritten at any time.
+    ///
+    /// # Arguments
+    /// * `caller` - Contract owner (must authorize)
+    /// * `new_treasury` - Address proposed as the next treasury
+    ///
+    /// # Errors
+    /// - `NotInitialized` if the split has not been initialized
+    /// - `Unauthorized` if `caller` is not the contract owner
+    ///
+    /// Emits `trsr_prop` event with `(owner, proposed_treasury)`.
+    pub fn propose_treasury(
+        env: Env,
+        caller: Address,
+        new_treasury: Address,
+    ) -> Result<(), RemittanceSplitError> {
+        caller.require_auth();
+        Self::extend_instance_ttl(&env);
+        Self::require_not_paused(&env)?;
+        let config: SplitConfig = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("CONFIG"))
+            .ok_or(RemittanceSplitError::NotInitialized)?;
+        if config.owner != caller {
+            return Err(RemittanceSplitError::Unauthorized);
+        }
+
+        Self::set_pending_treasury(&env, &new_treasury);
+
+        env.events().publish(
+            (symbol_short!("split"), symbol_short!("trsr_prop")),
+            (caller.clone(), new_treasury.clone()),
+        );
+        Ok(())
+    }
+
+    /// Step two of a two-step treasury rotation.
+    ///
+    /// The proposed treasury address accepts the role, completing the
+    /// rotation. Only the address staged by `propose_treasury` may accept, so
+    /// a wrong proposal cannot take over the treasury.
+    ///
+    /// # Arguments
+    /// * `caller` - Address previously proposed via `propose_treasury` (must authorize)
+    ///
+    /// # Errors
+    /// - `NoPendingTreasury` if no proposal is staged
+    /// - `PendingTreasuryMismatch` if `caller` is not the proposed address
+    ///
+    /// Emits `trsr_xfr` event with `(old_treasury, new_treasury)`.
+    pub fn accept_treasury(env: Env, caller: Address) -> Result<(), RemittanceSplitError> {
+        caller.require_auth();
+        Self::extend_instance_ttl(&env);
+
+        let pending =
+            Self::get_pending_treasury(&env).ok_or(RemittanceSplitError::NoPendingTreasury)?;
+        if pending != caller {
+            return Err(RemittanceSplitError::PendingTreasuryMismatch);
+        }
+
+        let old_treasury = Self::get_treasury(&env);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("TREASURY"), &caller);
+        Self::clear_pending_treasury(&env);
+
+        env.events().publish(
+            (symbol_short!("split"), symbol_short!("trsr_xfr")),
+            (old_treasury.clone(), caller.clone()),
+        );
+        Ok(())
+    }
+
+    /// Get the active protocol treasury address, if one has been accepted.
+    pub fn get_treasury_public(env: Env) -> Option<Address> {
+        Self::get_treasury(&env)
+    }
+
+    /// Get the currently proposed (pending) treasury address, if any.
+    pub fn get_pending_treasury_public(env: Env) -> Option<Address> {
+        Self::get_pending_treasury(&env)
+    }
+
     /// Update the contract version marker used for migrations and upgrade coordination.
     ///
     /// # Arguments
@@ -621,10 +751,7 @@ impl RemittanceSplit {
     ///
     /// # Events
     /// Emits `(symbol_short!("split"), symbol_short!("snap_pre"))` on success.
-    pub fn pre_upgrade(
-        env: Env,
-        caller: Address,
-    ) -> Result<(), RemittanceSplitError> {
+    pub fn pre_upgrade(env: Env, caller: Address) -> Result<(), RemittanceSplitError> {
         caller.require_auth();
         Self::extend_instance_ttl(&env);
 
@@ -649,9 +776,10 @@ impl RemittanceSplit {
             pause_admin: Self::get_pause_admin(&env),
         };
 
+        env.storage().persistent().set(&SNAPSHOT_KEY, &snapshot);
         env.storage()
             .persistent()
-            .set(&SNAPSHOT_KEY, &snapshot);
+            .set(&symbol_short!("SNAP_TS"), &env.ledger().timestamp());
 
         env.events().publish(
             (symbol_short!("split"), symbol_short!("snap_pre")),
@@ -681,10 +809,7 @@ impl RemittanceSplit {
     ///
     /// # Events
     /// Emits `(symbol_short!("split"), symbol_short!("snap_rst"))` on success.
-    pub fn restore_from_snapshot(
-        env: Env,
-        caller: Address,
-    ) -> Result<(), RemittanceSplitError> {
+    pub fn restore_from_snapshot(env: Env, caller: Address) -> Result<(), RemittanceSplitError> {
         caller.require_auth();
 
         let config: SplitConfig = env
@@ -706,6 +831,15 @@ impl RemittanceSplit {
 
         if snapshot.schema_version != SNAPSHOT_VERSION {
             return Err(RemittanceSplitError::UnsupportedVersion);
+        }
+
+        let snapshot_taken_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&symbol_short!("SNAP_TS"))
+            .unwrap_or(0);
+        if remitwise_common::require_recent_snapshot(&env, snapshot_taken_at).is_err() {
+            return Err(RemittanceSplitError::SnapshotTooOld);
         }
 
         Self::extend_instance_ttl(&env);
@@ -732,7 +866,10 @@ impl RemittanceSplit {
 
         // Restore upgrade admin
         match &snapshot.upgrade_admin {
-            Some(addr) => env.storage().instance().set(&symbol_short!("UPG_ADM"), addr),
+            Some(addr) => env
+                .storage()
+                .instance()
+                .set(&symbol_short!("UPG_ADM"), addr),
             None => env.storage().instance().remove(&symbol_short!("UPG_ADM")),
         }
 
@@ -748,7 +885,10 @@ impl RemittanceSplit {
         }
 
         match &snapshot.pause_admin {
-            Some(addr) => env.storage().instance().set(&symbol_short!("PAUSE_ADM"), addr),
+            Some(addr) => env
+                .storage()
+                .instance()
+                .set(&symbol_short!("PAUSE_ADM"), addr),
             None => env.storage().instance().remove(&symbol_short!("PAUSE_ADM")),
         }
 
@@ -776,10 +916,7 @@ impl RemittanceSplit {
     /// # Errors
     /// - `NotInitialized` if the contract has not been initialized
     /// - `Unauthorized` if `caller` is not the upgrade admin or owner
-    pub fn discard_snapshot(
-        env: Env,
-        caller: Address,
-    ) -> Result<(), RemittanceSplitError> {
+    pub fn discard_snapshot(env: Env, caller: Address) -> Result<(), RemittanceSplitError> {
         caller.require_auth();
 
         let config: SplitConfig = env
@@ -796,24 +933,23 @@ impl RemittanceSplit {
         env.storage().persistent().remove(&SNAPSHOT_KEY);
 
         Self::append_audit(&env, symbol_short!("snap_dsc"), &caller, true);
-        env.events().publish(
-            (symbol_short!("split"), symbol_short!("snap_dsc")),
-            (),
-        );
+        env.events()
+            .publish((symbol_short!("split"), symbol_short!("snap_dsc")), ());
 
         Ok(())
     }
 
-    /// Validate that every individual percentage is in [0, 100] **and** that
-    /// their sum equals exactly 100.
+    /// Validate that every individual percentage is in [0, 10_000] **and** that
+    /// their sum equals exactly 10_000.
     ///
     /// Enforced invariants (checked in order):
-    /// 1. Each bucket must be <= 100 (`InvalidPercentages`).
-    /// 2. The four buckets must sum to exactly 100 (`PercentagesDoNotSumTo100`).
+    /// 1. Each bucket must be `<= 10_000` (`PercentageOutOfRange`).
+    /// 2. The four buckets must sum to exactly `10_000` (`PercentagesDoNotSumTo100`).
     ///
-    /// Separating the two checks gives callers a precise error code:
-    /// a value like 110/0/0/0 produces `InvalidPercentages`, not a misleading
-    /// "doesn't sum to 100" message.
+    /// Defensive note: the `u32` type implies a lower-bound of 0; an explicit `< 0`
+    /// check is unnecessary. Splitting these into two checks gives callers a
+    /// precise error code: a value like `11_000/0/0/0` produces
+    /// `PercentageOutOfRange`, not a misleading "doesn't sum to 10_000" message.
     fn validate_percentages(
         spending_percent: u32,
         savings_percent: u32,
@@ -821,18 +957,50 @@ impl RemittanceSplit {
         insurance_percent: u32,
     ) -> Result<(), RemittanceSplitError> {
         // Per-bucket upper-bound check — must precede sum check.
-        if spending_percent > 100
-            || savings_percent > 100
-            || bills_percent > 100
-            || insurance_percent > 100
+        if spending_percent > 10_000
+            || savings_percent > 10_000
+            || bills_percent > 10_000
+            || insurance_percent > 10_000
         {
-            return Err(RemittanceSplitError::InvalidPercentages);
+            return Err(RemittanceSplitError::PercentageOutOfRange);
         }
         // Global sum invariant.
         let total = spending_percent + savings_percent + bills_percent + insurance_percent;
-        if total != 100 {
-            return Err(RemittanceSplitError::InvalidPercentages);
+        if total != 10_000 {
+            return Err(RemittanceSplitError::PercentagesDoNotSumTo100);
         }
+        Ok(())
+    }
+
+    /// Validate that the ingress token is a supported stable asset contract.
+    ///
+    /// This is a defence-in-depth check against rebase/deflationary token contracts
+    /// that can silently change balances during transfer and thereby violate the
+    /// remittance split invariants. The contract only accepts a well-known stable
+    /// asset shape at the point where the trusted token is pinned.
+    fn validate_supported_token_contract(
+        env: &Env,
+        token_contract: &Address,
+    ) -> Result<(), RemittanceSplitError> {
+        let token = TokenClient::new(env, token_contract);
+
+        let symbol = token
+            .try_symbol()
+            .map_err(|_| RemittanceSplitError::UnsupportedTokenContract)?
+            .map_err(|_| RemittanceSplitError::UnsupportedTokenContract)?;
+        let name = token
+            .try_name()
+            .map_err(|_| RemittanceSplitError::UnsupportedTokenContract)?
+            .map_err(|_| RemittanceSplitError::UnsupportedTokenContract)?;
+        let decimals = token
+            .try_decimals()
+            .map_err(|_| RemittanceSplitError::UnsupportedTokenContract)?
+            .map_err(|_| RemittanceSplitError::UnsupportedTokenContract)?;
+
+        if symbol.is_empty() || name.is_empty() || decimals > 18 {
+            return Err(RemittanceSplitError::UnsupportedTokenContract);
+        }
+
         Ok(())
     }
 
@@ -843,10 +1011,10 @@ impl RemittanceSplit {
     /// * `nonce` - Caller's transaction nonce (must equal get_nonce(owner)) for replay protection
     /// * `usdc_contract` - The trusted USDC token contract address; only this address is
     ///   permitted in future `distribute_usdc` calls (prevents token substitution attacks)
-    /// * `spending_percent` - Percentage for spending (0-100)
-    /// * `savings_percent` - Percentage for savings (0-100)
-    /// * `bills_percent` - Percentage for bills (0-100)
-    /// * `insurance_percent` - Percentage for insurance (0-100)
+    /// * `spending_percent` - Percentage for spending (basis points, 0-10_000)
+    /// * `savings_percent` - Percentage for savings (basis points, 0-10_000)
+    /// * `bills_percent` - Percentage for bills (basis points, 0-10_000)
+    /// * `insurance_percent` - Percentage for insurance (basis points, 0-10_000)
     ///
     /// # Returns
     /// True if initialization was successful
@@ -854,7 +1022,7 @@ impl RemittanceSplit {
     /// # Errors
     /// - `Unauthorized` if owner doesn't authorize the transaction
     /// - `InvalidNonce` if nonce is invalid (replay protection)
-    /// - `PercentagesDoNotSumTo100` if percentages don't sum to 100
+    /// - `PercentagesDoNotSumTo100` if percentages don't sum to 10_000
     /// - `AlreadyInitialized` if split is already initialized (use update_split instead)
     pub fn initialize_split(
         env: Env,
@@ -883,20 +1051,35 @@ impl RemittanceSplit {
         Self::require_not_paused(&env)?;
         Self::require_nonce(&env, &owner, nonce)?;
 
+        if let Err(_e) = Self::validate_supported_token_contract(&env, &usdc_contract) {
+            Self::append_audit(&env, symbol_short!("init"), &owner, false);
+            return Err(RemittanceSplitError::UnsupportedTokenContract);
+        }
+
         let existing: Option<SplitConfig> = env.storage().instance().get(&symbol_short!("CONFIG"));
         if existing.is_some() {
             Self::append_audit(&env, symbol_short!("init"), &owner, false);
             return Err(RemittanceSplitError::AlreadyInitialized);
         }
 
-        if let Err(_e) = Self::validate_percentages(
+        if let Err(e) = Self::validate_percentages(
             spending_percent,
             savings_percent,
             bills_percent,
             insurance_percent,
         ) {
             Self::append_audit(&env, symbol_short!("init"), &owner, false);
-            return Err(RemittanceSplitError::InvalidPercentages);
+            return Err(e);
+        }
+
+        if let Err(_e) = Self::validate_supported_token_contract(&env, &usdc_contract) {
+            Self::append_audit(&env, symbol_short!("init"), &owner, false);
+            return Err(RemittanceSplitError::UnsupportedTokenContract);
+        }
+
+        if let Err(_e) = Self::validate_supported_token_contract(&env, &usdc_contract) {
+            Self::append_audit(&env, symbol_short!("init"), &owner, false);
+            return Err(RemittanceSplitError::UnsupportedTokenContract);
         }
 
         Self::extend_instance_ttl(&env);
@@ -963,14 +1146,14 @@ impl RemittanceSplit {
             return Err(RemittanceSplitError::Unauthorized);
         }
 
-        if let Err(_e) = Self::validate_percentages(
+        if let Err(e) = Self::validate_percentages(
             spending_percent,
             savings_percent,
             bills_percent,
             insurance_percent,
         ) {
             Self::append_audit(&env, symbol_short!("update"), &caller, false);
-            return Err(RemittanceSplitError::InvalidPercentages);
+            return Err(e);
         }
 
         Self::extend_instance_ttl(&env);
@@ -1016,7 +1199,7 @@ impl RemittanceSplit {
         env.storage()
             .instance()
             .get(&symbol_short!("SPLIT"))
-            .unwrap_or_else(|| vec![&env, 50, 30, 15, 5])
+            .unwrap_or_else(|| vec![&env, 5000, 3000, 1500, 500])
     }
 
     pub fn get_config(env: Env) -> Option<SplitConfig> {
@@ -1034,30 +1217,27 @@ impl RemittanceSplit {
 
         let split = Self::get_split(&env);
         let s0 = match split.get(0) {
-            Some(v) => v as i128,
+            Some(v) => v
+                .to_i128_checked()
+                .map_err(|_| RemittanceSplitError::Overflow)?,
             None => return Err(RemittanceSplitError::Overflow),
         };
         let s1 = match split.get(1) {
-            Some(v) => v as i128,
+            Some(v) => v
+                .to_i128_checked()
+                .map_err(|_| RemittanceSplitError::Overflow)?,
             None => return Err(RemittanceSplitError::Overflow),
         };
         let s2 = match split.get(2) {
-            Some(v) => v as i128,
+            Some(v) => v
+                .to_i128_checked()
+                .map_err(|_| RemittanceSplitError::Overflow)?,
             None => return Err(RemittanceSplitError::Overflow),
         };
 
-        let spending = total_amount
-            .checked_mul(s0)
-            .and_then(|n| n.checked_div(100))
-            .ok_or(RemittanceSplitError::Overflow)?;
-        let savings = total_amount
-            .checked_mul(s1)
-            .and_then(|n| n.checked_div(100))
-            .ok_or(RemittanceSplitError::Overflow)?;
-        let bills = total_amount
-            .checked_mul(s2)
-            .and_then(|n| n.checked_div(100))
-            .ok_or(RemittanceSplitError::Overflow)?;
+        let spending = Self::floor_percentage(total_amount, s0)?;
+        let savings = Self::floor_percentage(total_amount, s1)?;
+        let bills = Self::floor_percentage(total_amount, s2)?;
         // Insurance gets the remainder to handle rounding
         let insurance = total_amount
             .checked_sub(spending)
@@ -1091,6 +1271,30 @@ impl RemittanceSplit {
         );
 
         Ok(vec![&env, spending, savings, bills, insurance])
+    }
+
+    fn floor_percentage(amount: i128, percent: i128) -> Result<i128, RemittanceSplitError> {
+        if percent <= 0 {
+            return Ok(0);
+        }
+
+        let whole = amount
+            .checked_div(10_000)
+            .ok_or(RemittanceSplitError::Overflow)?;
+        let remainder = amount
+            .checked_rem(10_000)
+            .ok_or(RemittanceSplitError::Overflow)?;
+        let scaled_whole = whole
+            .checked_mul(percent)
+            .ok_or(RemittanceSplitError::Overflow)?;
+        let scaled_remainder = remainder
+            .checked_mul(percent)
+            .and_then(|n| n.checked_div(10_000))
+            .ok_or(RemittanceSplitError::Overflow)?;
+
+        scaled_whole
+            .checked_add(scaled_remainder)
+            .ok_or(RemittanceSplitError::Overflow)
     }
 
     /// Distribute USDC from `from` to the four split destination accounts according
@@ -1177,6 +1381,10 @@ impl RemittanceSplit {
             Self::append_audit(&env, symbol_short!("distrib"), &from, false);
             return Err(RemittanceSplitError::InvalidAmount);
         }
+        if verify_no_dust(total_amount).is_err() {
+            Self::append_audit(&env, symbol_short!("distrib"), &from, false);
+            return Err(RemittanceSplitError::InvalidAmount);
+        }
 
         // 7. No destination account may equal the sender (self-transfer guard).
         if accounts.spending == from
@@ -1217,18 +1425,7 @@ impl RemittanceSplit {
 
         // 10. Advance nonce, record audit, emit events.
         Self::increment_nonce(&env, &from)?;
-
-        // Emit unstructured event for backward compatibility
-        RemitwiseEvents::emit(
-            &env,
-            EventCategory::Transaction,
-            EventPriority::Medium,
-            symbol_short!("dist_ok"),
-            (from.clone(), total_amount),
-        );
-
-        // Structured distribution event removed to reduce transient memory allocations
-        // (keeps the lightweight unstructured event for backward compatibility).
+        Self::emit_distribution_completed(&env, &from, total_amount, &amounts);
 
         Ok(true)
     }
@@ -1237,6 +1434,9 @@ impl RemittanceSplit {
     ///
     /// This function provides secure USDC distribution with deterministic request hashing
     /// and deadline enforcement. Integrators sign the request hash before calling this function.
+    ///
+    /// On success emits the same structured [`DistributionCompletedEvent`] as
+    /// [`Self::distribute_usdc`] via [`Self::emit_distribution_completed`].
     ///
     /// # Arguments
     /// * `env` - Soroban environment
@@ -1289,6 +1489,10 @@ impl RemittanceSplit {
             Self::append_audit(&env, symbol_short!("distH"), &request.from, false);
             return Err(RemittanceSplitError::InvalidAmount);
         }
+        if verify_no_dust(request.total_amount).is_err() {
+            Self::append_audit(&env, symbol_short!("distH"), &request.from, false);
+            return Err(RemittanceSplitError::InvalidAmount);
+        }
 
         // Validate deadline
         let current_time = env.ledger().timestamp();
@@ -1302,14 +1506,14 @@ impl RemittanceSplit {
         }
 
         // Validate deadline is within reasonable bounds (max 1 hour from now)
-        let deadline_in_future = request.deadline - current_time;
+        let deadline_in_future = Timestamp::seconds_until(current_time, request.deadline);
         if deadline_in_future > MAX_DEADLINE_WINDOW_SECS {
             Self::append_audit(&env, symbol_short!("distH"), &request.from, false);
             return Err(RemittanceSplitError::InvalidDeadline);
         }
 
         // Verify request hash matches computed hash (binds all signed fields + domain_id)
-        let computed_hash = Self::get_request_hash(env.clone(), request.clone());
+        let computed_hash = Self::get_request_hash(env.clone(), request.clone())?;
         if computed_hash.ne(&request_hash) {
             Self::append_audit(&env, symbol_short!("distH"), &request.from, false);
             return Err(RemittanceSplitError::RequestHashMismatch);
@@ -1366,6 +1570,7 @@ impl RemittanceSplit {
         // Increment nonce and record success
         Self::increment_nonce(&env, &request.from)?;
         Self::append_audit(&env, symbol_short!("distH"), &request.from, true);
+        Self::emit_distribution_completed(&env, &request.from, request.total_amount, &amounts);
         Ok(true)
     }
 
@@ -1461,10 +1666,10 @@ impl RemittanceSplit {
     ///   by `compute_checksum` over the snapshot fields.
     /// * `SnapshotNotInitialized` — `snapshot.config.initialized` is `false`; the
     ///   snapshot represents an incomplete or factory-default configuration.
-    /// * `InvalidPercentageRange` — at least one of `spending_percent`,
-    ///   `savings_percent`, `bills_percent`, or `insurance_percent` exceeds `100`.
-    /// * `InvalidPercentages` — all four percentage fields are within `[0, 100]` but
-    ///   their sum is not equal to `100`.
+    /// * `PercentageOutOfRange` — at least one of `spending_percent`,
+    ///   `savings_percent`, `bills_percent`, or `insurance_percent` exceeds `10_000`.
+    /// * `PercentagesDoNotSumTo100` — all four percentage fields are within
+    ///   `[0, 10_000]` but their sum is not equal to `10_000`.
     /// * `InvalidAmount` — `snapshot.config.timestamp` is greater than the current
     ///   ledger timestamp, indicating a future-dated or replayed payload.
     /// * `Unauthorized` — `caller` is not the current on-chain owner stored in
@@ -1511,13 +1716,13 @@ impl RemittanceSplit {
 
         // 4. Per-field percentage range — reject values that could not have
         //    been produced by a valid initialize_split / update_split call.
-        if snapshot.config.spending_percent > 100
-            || snapshot.config.savings_percent > 100
-            || snapshot.config.bills_percent > 100
-            || snapshot.config.insurance_percent > 100
+        if snapshot.config.spending_percent > 10_000
+            || snapshot.config.savings_percent > 10_000
+            || snapshot.config.bills_percent > 10_000
+            || snapshot.config.insurance_percent > 10_000
         {
             Self::append_audit(&env, symbol_short!("import"), &caller, false);
-            return Err(RemittanceSplitError::InvalidPercentages);
+            return Err(RemittanceSplitError::PercentageOutOfRange);
         }
 
         // 5. Sum constraint
@@ -1525,7 +1730,7 @@ impl RemittanceSplit {
             + snapshot.config.savings_percent
             + snapshot.config.bills_percent
             + snapshot.config.insurance_percent;
-        if total != 100 {
+        if total != 10_000 {
             Self::append_audit(&env, symbol_short!("import"), &caller, false);
             return Err(RemittanceSplitError::PercentagesDoNotSumTo100);
         }
@@ -1566,7 +1771,9 @@ impl RemittanceSplit {
                     Self::append_audit(&env, symbol_short!("import"), &caller, false);
                     return Err(RemittanceSplitError::ScheduleIntervalTooShort);
                 }
-                if schedule.next_due.saturating_sub(current_time) > MAX_SCHEDULE_LEAD_TIME {
+                if Timestamp::seconds_until(current_time, schedule.next_due)
+                    > MAX_SCHEDULE_LEAD_TIME
+                {
                     Self::append_audit(&env, symbol_short!("import"), &caller, false);
                     return Err(RemittanceSplitError::ScheduleLeadTimeTooLong);
                 }
@@ -1574,6 +1781,8 @@ impl RemittanceSplit {
         }
 
         Self::extend_instance_ttl(&env);
+
+        // --- Restore config and split percentages ---
         env.storage()
             .instance()
             .set(&symbol_short!("CONFIG"), &snapshot.config);
@@ -1627,9 +1836,10 @@ impl RemittanceSplit {
     /// - `ChecksumMismatch` — the stored checksum does not match the freshly
     ///   computed digest over the snapshot fields.
     /// - `SnapshotNotInitialized` — `snapshot.config.initialized` is `false`.
-    /// - `InvalidPercentageRange` — at least one of the four percentage fields
-    ///   individually exceeds `100`.
-    /// - `InvalidPercentages` — all four fields are ≤ 100 but their sum is not `100`.
+    /// - `PercentageOutOfRange` — at least one of the four percentage fields
+    ///   individually exceeds `10_000`.
+    /// - `PercentagesDoNotSumTo100` — all four fields are ≤ `10_000` but their sum
+    ///   is not `10_000`.
     /// - `InvalidAmount` — `snapshot.config.timestamp` is greater than the current
     ///   ledger timestamp (future-dated payload).
     ///
@@ -1663,12 +1873,12 @@ impl RemittanceSplit {
         }
 
         // 4. Per-field range
-        if snapshot.config.spending_percent > 100
-            || snapshot.config.savings_percent > 100
-            || snapshot.config.bills_percent > 100
-            || snapshot.config.insurance_percent > 100
+        if snapshot.config.spending_percent > 10_000
+            || snapshot.config.savings_percent > 10_000
+            || snapshot.config.bills_percent > 10_000
+            || snapshot.config.insurance_percent > 10_000
         {
-            return Err(RemittanceSplitError::InvalidPercentages);
+            return Err(RemittanceSplitError::PercentageOutOfRange);
         }
 
         // 5. Sum constraint
@@ -1676,8 +1886,8 @@ impl RemittanceSplit {
             + snapshot.config.savings_percent
             + snapshot.config.bills_percent
             + snapshot.config.insurance_percent;
-        if total != 100 {
-            return Err(RemittanceSplitError::InvalidPercentages);
+        if total != 10_000 {
+            return Err(RemittanceSplitError::PercentagesDoNotSumTo100);
         }
 
         // 6. Timestamp sanity
@@ -1690,6 +1900,9 @@ impl RemittanceSplit {
     }
 
     /// Return a page of audit log entries with a stable cursor.
+    ///
+    /// See [`docs/PAGINATION_HANDBOOK.md`](../../docs/PAGINATION_HANDBOOK.md) for the invariants
+    /// all paginated reads must satisfy, cursor semantics, and the reviewer checklist.
     ///
     /// # Parameters
     /// - `from_index`: zero-based starting index (pass 0 for the first page,
@@ -1859,7 +2072,10 @@ impl RemittanceSplit {
     ///
     /// Mutating *any* field in `request` yields a different 32-byte hash,
     /// guaranteeing field-substitution resistance across all signed parameters.
-    pub fn get_request_hash(env: Env, request: DistributeUsdcRequest) -> Bytes {
+    pub fn get_request_hash(
+        env: Env,
+        request: DistributeUsdcRequest,
+    ) -> Result<Bytes, RemittanceSplitError> {
         let mut preimage = Bytes::new(&env);
 
         // 1. Domain separator
@@ -1902,7 +2118,9 @@ impl RemittanceSplit {
         // 11. deadline — 8 bytes LE
         preimage.extend_from_slice(&request.deadline.to_le_bytes());
 
-        env.crypto().sha256(&preimage).into()
+        let hash: Bytes = env.crypto().sha256(&preimage).into();
+        guard_bytes_len(&hash).map_err(|_| RemittanceSplitError::ReturnBytesTooLarge)?;
+        Ok(hash)
     }
 
     /// Works in `no_std` — uses `Symbol::to_val()` to extract the raw
@@ -1973,6 +2191,45 @@ impl RemittanceSplit {
             .wrapping_mul(31)
     }
 
+    /// Emit distribution completion telemetry shared by `distribute_usdc` and
+    /// `distribute_usdc_hashed`.
+    ///
+    /// Publishes two events so indexers can choose either surface:
+    /// 1. Unstructured `dist_ok` via `RemitwiseEvents` (backward compatibility)
+    /// 2. Structured `(split, DistributionCompleted)` with per-category amounts
+    ///
+    /// Category amounts must be the post-transfer split vector returned by
+    /// [`Self::calculate_split_amounts`] so dust/remainder is reflected identically
+    /// on both entrypoints.
+    fn emit_distribution_completed(
+        env: &Env,
+        from: &Address,
+        total_amount: i128,
+        amounts: &[i128; 4],
+    ) {
+        RemitwiseEvents::emit(
+            env,
+            EventCategory::Transaction,
+            EventPriority::Medium,
+            symbol_short!("dist_ok"),
+            (from.clone(), total_amount),
+        );
+
+        let event = DistributionCompletedEvent {
+            from: from.clone(),
+            total_amount,
+            spending_amount: amounts[0],
+            savings_amount: amounts[1],
+            bills_amount: amounts[2],
+            insurance_amount: amounts[3],
+            timestamp: env.ledger().timestamp(),
+        };
+        env.events().publish(
+            (symbol_short!("split"), SplitEvent::DistributionCompleted),
+            event,
+        );
+    }
+
     fn append_audit(env: &Env, operation: Symbol, caller: &Address, success: bool) {
         let timestamp = env.ledger().timestamp();
         let mut log: Vec<AuditEntry> = env
@@ -2040,29 +2297,35 @@ impl RemittanceSplit {
 
         let split = Self::get_split(env);
         let s0 = match split.get(0) {
-            Some(v) => v as i128,
+            Some(v) => v
+                .to_i128_checked()
+                .map_err(|_| RemittanceSplitError::Overflow)?,
             None => return Err(RemittanceSplitError::Overflow),
         };
         let s1 = match split.get(1) {
-            Some(v) => v as i128,
+            Some(v) => v
+                .to_i128_checked()
+                .map_err(|_| RemittanceSplitError::Overflow)?,
             None => return Err(RemittanceSplitError::Overflow),
         };
         let s2 = match split.get(2) {
-            Some(v) => v as i128,
+            Some(v) => v
+                .to_i128_checked()
+                .map_err(|_| RemittanceSplitError::Overflow)?,
             None => return Err(RemittanceSplitError::Overflow),
         };
 
         let spending = total_amount
             .checked_mul(s0)
-            .and_then(|n| n.checked_div(100))
+            .and_then(|n| n.checked_div(10_000))
             .ok_or(RemittanceSplitError::Overflow)?;
         let savings = total_amount
             .checked_mul(s1)
-            .and_then(|n| n.checked_div(100))
+            .and_then(|n| n.checked_div(10_000))
             .ok_or(RemittanceSplitError::Overflow)?;
         let bills = total_amount
             .checked_mul(s2)
-            .and_then(|n| n.checked_div(100))
+            .and_then(|n| n.checked_div(10_000))
             .ok_or(RemittanceSplitError::Overflow)?;
         let insurance = total_amount
             .checked_sub(spending)
@@ -2161,7 +2424,7 @@ impl RemittanceSplit {
             return Err(RemittanceSplitError::ScheduleIntervalTooShort);
         }
 
-        if next_due.saturating_sub(current_time) > MAX_SCHEDULE_LEAD_TIME {
+        if Timestamp::seconds_until(current_time, next_due) > MAX_SCHEDULE_LEAD_TIME {
             return Err(RemittanceSplitError::ScheduleLeadTimeTooLong);
         }
 
@@ -2286,7 +2549,7 @@ impl RemittanceSplit {
             return Err(RemittanceSplitError::ScheduleIntervalTooShort);
         }
 
-        if next_due.saturating_sub(current_time) > MAX_SCHEDULE_LEAD_TIME {
+        if Timestamp::seconds_until(current_time, next_due) > MAX_SCHEDULE_LEAD_TIME {
             return Err(RemittanceSplitError::ScheduleLeadTimeTooLong);
         }
 
@@ -2642,6 +2905,9 @@ impl RemittanceSplit {
     }
 
     /// Get a single page of remittance schedules for `owner` using cursor-based pagination.
+    ///
+    /// See [`docs/PAGINATION_HANDBOOK.md`](../../docs/PAGINATION_HANDBOOK.md) for the invariants
+    /// all paginated reads must satisfy, cursor semantics, and the reviewer checklist.
     ///
     /// Schedules are ordered by ID ascending. `cursor` is a zero-based index into the
     /// owner's sorted schedule list. `limit` is clamped to `MAX_PAGE_LIMIT` via

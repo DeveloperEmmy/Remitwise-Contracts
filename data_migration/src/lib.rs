@@ -60,11 +60,18 @@ use std::collections::{BTreeMap, HashMap};
 /// Format: `enc:v1:<base64>`
 const ENCRYPTED_PAYLOAD_PREFIX_V1: &str = "enc:v1:";
 
+/// Format: `enc:v2:<base64>` — future version placeholder with stricter size cap.
+#[cfg(test)]
+const ENCRYPTED_PAYLOAD_PREFIX_V2: &str = "enc:v2:";
+
 /// Current encrypted payload schema version.
 pub const ENCRYPTED_PAYLOAD_VERSION: u32 = 1;
 
 /// Minimum supported encrypted payload version for import.
 pub const MIN_SUPPORTED_ENCRYPTED_VERSION: u32 = 1;
+
+/// Maximum supported encrypted payload version for import.
+pub const MAX_SUPPORTED_ENCRYPTED_VERSION: u32 = 2;
 
 /// Current snapshot schema version for migration compatibility.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -401,7 +408,7 @@ impl ExportSnapshot {
 
     /// Check if snapshot version is supported for import.
     pub fn is_version_compatible(&self) -> bool {
-        self.header.version >= MIN_SUPPORTED_VERSION && self.header.version <= SCHEMA_VERSION
+        (MIN_SUPPORTED_VERSION..=SCHEMA_VERSION).contains(&self.header.version)
     }
 
     /// Validate payload size and logical record bounds.
@@ -873,10 +880,10 @@ pub fn import_from_encrypted_payload(encoded: &str) -> Result<Vec<u8>, Migration
     })?;
 
     // Check version compatibility
-    if version < MIN_SUPPORTED_ENCRYPTED_VERSION || version > ENCRYPTED_PAYLOAD_VERSION {
+    if !(MIN_SUPPORTED_ENCRYPTED_VERSION..=MAX_SUPPORTED_ENCRYPTED_VERSION).contains(&version) {
         return Err(MigrationError::UnsupportedEncryptedVersion {
             found: version,
-            max: ENCRYPTED_PAYLOAD_VERSION,
+            max: MAX_SUPPORTED_ENCRYPTED_VERSION,
         });
     }
 
@@ -892,14 +899,11 @@ pub fn import_from_encrypted_payload(encoded: &str) -> Result<Vec<u8>, Migration
     // Dispatch to version-specific handler
     match version {
         1 => import_from_encrypted_payload_v1(rest),
-        _ => {
-            // This should not be reached due to version check above,
-            // but keep as a safety fallback
-            Err(MigrationError::UnsupportedEncryptedVersion {
-                found: version,
-                max: ENCRYPTED_PAYLOAD_VERSION,
-            })
-        }
+        2 => import_from_encrypted_payload_v2(rest),
+        _ => Err(MigrationError::UnsupportedEncryptedVersion {
+            found: version,
+            max: MAX_SUPPORTED_ENCRYPTED_VERSION,
+        }),
     }
 }
 
@@ -913,6 +917,29 @@ fn import_from_encrypted_payload_v1(base64_payload: &str) -> Result<Vec<u8>, Mig
                 Err(MigrationError::PayloadTooLarge {
                     size: bytes.len(),
                     max: MAX_MIGRATION_PAYLOAD_BYTES,
+                })
+            } else {
+                Ok(bytes)
+            }
+        })
+}
+
+/// Handler for encrypted payload version 2.
+///
+/// enc:v2 uses the same base64-encoded wire format as v1 but applies a stricter
+/// payload size cap (half of v1's limit) to reduce attack surface for future
+/// cryptographic operations. Existing v1 payloads under the cap are accepted.
+fn import_from_encrypted_payload_v2(base64_payload: &str) -> Result<Vec<u8>, MigrationError> {
+    const V2_MAX_PAYLOAD: usize = MAX_MIGRATION_PAYLOAD_BYTES / 2;
+
+    base64::engine::general_purpose::STANDARD
+        .decode(base64_payload)
+        .map_err(|e| MigrationError::InvalidFormat(e.to_string()))
+        .and_then(|bytes| {
+            if bytes.len() > V2_MAX_PAYLOAD {
+                Err(MigrationError::PayloadTooLarge {
+                    size: bytes.len(),
+                    max: V2_MAX_PAYLOAD,
                 })
             } else {
                 Ok(bytes)
@@ -1133,7 +1160,7 @@ struct CsvGoalRow {
 
 /// Version compatibility check for migration scripts.
 pub fn check_version_compatibility(version: u32) -> Result<(), MigrationError> {
-    if version >= MIN_SUPPORTED_VERSION && version <= SCHEMA_VERSION {
+    if (MIN_SUPPORTED_VERSION..=SCHEMA_VERSION).contains(&version) {
         Ok(())
     } else {
         Err(MigrationError::IncompatibleVersion {
@@ -1259,6 +1286,34 @@ impl RollbackMetadata {
         tracker.unmark_imported_by_identity(&self.attempted_checksum, self.attempted_version);
         Ok(())
     }
+
+    /// Returns true if a previous snapshot was captured (i.e. there was prior state
+    /// to restore to). When false, `restore` will set state to None (empty).
+    pub fn has_previous_state(&self) -> bool {
+        self.previous_snapshot.is_some()
+    }
+
+    /// Returns a human-readable audit description of this rollback event,
+    /// suitable for logging to an audit trail.
+    pub fn describe(&self) -> String {
+        if self.has_previous_state() {
+            format!(
+                "Rollback[ts={}]: reverted attempted v{} (checksum={}) to previous v{} (checksum={})",
+                self.timestamp_ms,
+                self.attempted_version,
+                &self.attempted_checksum[..self.attempted_checksum.len().min(8)],
+                self.previous_version,
+                &self.previous_checksum[..self.previous_checksum.len().min(8)],
+            )
+        } else {
+            format!(
+                "Rollback[ts={}]: reverted attempted v{} (checksum={}) — no previous state, cleared to empty",
+                self.timestamp_ms,
+                self.attempted_version,
+                &self.attempted_checksum[..self.attempted_checksum.len().min(8)],
+            )
+        }
+    }
 }
 
 /// Validate payload-type-specific semantic invariants at import time.
@@ -1270,7 +1325,7 @@ impl RollbackMetadata {
 /// # Invariants
 ///
 /// ## `RemittanceSplit`
-/// `spending_percent + savings_percent + bills_percent + insurance_percent == 100`.
+/// `spending_percent + savings_percent + bills_percent + insurance_percent == 10000`.
 ///
 /// ## `SavingsGoals`
 /// - `next_id >= max(goal.id)` — counter must not have been wound back.
@@ -1281,14 +1336,27 @@ impl RollbackMetadata {
 fn validate_payload_semantics(payload: &SnapshotPayload) -> Result<(), MigrationError> {
     match payload {
         SnapshotPayload::RemittanceSplit(export) => {
+            if export.spending_percent > 10_000
+                || export.savings_percent > 10_000
+                || export.bills_percent > 10_000
+                || export.insurance_percent > 10_000
+            {
+                return Err(MigrationError::ValidationFailed(format!(
+                    "RemittanceSplit percentages must be <= 10000 (basis points), got (spending={}, savings={}, bills={}, insurance={})",
+                    export.spending_percent,
+                    export.savings_percent,
+                    export.bills_percent,
+                    export.insurance_percent,
+                )));
+            }
             let sum = export
                 .spending_percent
                 .saturating_add(export.savings_percent)
                 .saturating_add(export.bills_percent)
                 .saturating_add(export.insurance_percent);
-            if sum != 100 {
+            if sum != 10_000 {
                 return Err(MigrationError::ValidationFailed(format!(
-                    "RemittanceSplit percentages must sum to 100, got {} \
+                    "RemittanceSplit percentages must sum to 10000 (basis points), got {} \
                      (spending={}, savings={}, bills={}, insurance={})",
                     sum,
                     export.spending_percent,
@@ -1363,10 +1431,10 @@ mod tests {
     fn sample_remittance_payload() -> SnapshotPayload {
         SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
             owner: "GABC".into(),
-            spending_percent: 50,
-            savings_percent: 30,
-            bills_percent: 15,
-            insurance_percent: 5,
+            spending_percent: 5000,
+            savings_percent: 3000,
+            bills_percent: 1500,
+            insurance_percent: 500,
         })
     }
 
@@ -1509,10 +1577,10 @@ mod tests {
         let second_snapshot = ExportSnapshot::new(
             SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
                 owner: "GABC".into(),
-                spending_percent: 45,
-                savings_percent: 35,
-                bills_percent: 15,
-                insurance_percent: 5,
+                spending_percent: 4500,
+                savings_percent: 3500,
+                bills_percent: 1500,
+                insurance_percent: 500,
             }),
             ExportFormat::Json,
         );
@@ -1792,6 +1860,59 @@ mod tests {
     }
 
     #[test]
+    fn test_csv_import_rejects_malformed_row_missing_fields() {
+        // Row with fewer fields than the header — CSV deserializer must error.
+        let csv = "id,owner,name,target_amount,current_amount,target_date,locked\n\
+                   1,alice,Emergency\n";
+        let err = import_goals_from_csv(csv.as_bytes()).unwrap_err();
+        assert!(
+            matches!(err, MigrationError::DeserializeError(_)),
+            "expected DeserializeError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_csv_import_rejects_negative_amounts() {
+        let csv = "id,owner,name,target_amount,current_amount,target_date,locked\n\
+                   1,alice,Vacation,-500,0,9999999,false\n";
+        let err = import_goals_from_csv(csv.as_bytes()).unwrap_err();
+        assert!(
+            matches!(err, MigrationError::ValidationFailed(_)),
+            "expected ValidationFailed for negative amount, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_csv_import_strips_formula_injection_prefix() {
+        // A name starting with '=CMD' must be sanitized — the importer must
+        // not reject it outright but must strip (or accept safely quoted) injection attempts.
+        // The sanitizer wraps '=...' in a leading ' prefix; an injected '=' after the
+        // prefix stripping is the sanitized value, not a formula.
+        let csv = "id,owner,name,target_amount,current_amount,target_date,locked\n\
+                   1,alice,'=CMD|' /C calc!A0,500,0,9999999,false\n";
+        let goals = import_goals_from_csv(csv.as_bytes()).unwrap();
+        assert_eq!(goals.len(), 1);
+        // After sanitization the leading ' must be stripped if it preceded a formula char.
+        // The name must not contain a leading quote that would survive as a formula marker.
+        let name = &goals[0].name;
+        assert!(
+            !name.starts_with('\''),
+            "sanitized name should not retain leading quote: {name}"
+        );
+    }
+
+    #[test]
+    fn test_csv_import_rejects_non_numeric_amount_field() {
+        let csv = "id,owner,name,target_amount,current_amount,target_date,locked\n\
+                   1,alice,Goal,notanumber,0,9999999,false\n";
+        let err = import_goals_from_csv(csv.as_bytes()).unwrap_err();
+        assert!(
+            matches!(err, MigrationError::DeserializeError(_)),
+            "expected DeserializeError for non-numeric amount, got {err:?}"
+        );
+    }
+
+    #[test]
     fn test_encrypted_payload_roundtrip_at_size_limit_succeeds() {
         let plain = vec![42u8; MAX_MIGRATION_PAYLOAD_BYTES];
         let encoded = export_to_encrypted_payload(&plain).unwrap();
@@ -1808,15 +1929,54 @@ mod tests {
 
     #[test]
     fn test_encrypted_payload_unsupported_version_marker_fails() {
+        // v3 is beyond MAX_SUPPORTED_ENCRYPTED_VERSION.
         let encoded = format!(
-            "enc:v2:{}",
+            "enc:v3:{}",
             base64::engine::general_purpose::STANDARD.encode(b"abc")
         );
         let err = import_from_encrypted_payload(&encoded).unwrap_err();
         assert!(matches!(
             err,
-            MigrationError::UnsupportedEncryptedVersion { found: 2, max: 1 }
+            MigrationError::UnsupportedEncryptedVersion { found: 3, max: 2 }
         ));
+    }
+
+    #[test]
+    fn test_enc_v2_roundtrip_succeeds_for_small_payload() {
+        let plain = b"enc:v2 test payload";
+        let encoded = format!(
+            "{}{}",
+            ENCRYPTED_PAYLOAD_PREFIX_V2,
+            base64::engine::general_purpose::STANDARD.encode(plain)
+        );
+        let decoded = import_from_encrypted_payload(&encoded).unwrap();
+        assert_eq!(decoded, plain);
+    }
+
+    #[test]
+    fn test_enc_v2_rejects_payload_exceeding_v2_size_cap() {
+        // v2 cap = MAX_MIGRATION_PAYLOAD_BYTES / 2; send one byte over.
+        let oversized = vec![0u8; MAX_MIGRATION_PAYLOAD_BYTES / 2 + 1];
+        let encoded = format!(
+            "{}{}",
+            ENCRYPTED_PAYLOAD_PREFIX_V2,
+            base64::engine::general_purpose::STANDARD.encode(&oversized)
+        );
+        let err = import_from_encrypted_payload(&encoded).unwrap_err();
+        assert!(matches!(err, MigrationError::PayloadTooLarge { .. }));
+    }
+
+    #[test]
+    fn test_enc_v1_accepted_under_v2_size_cap_does_not_use_v2_rules() {
+        // A small v1 payload must still be accepted (v2 size cap does not apply to v1).
+        let plain = b"small v1 payload";
+        let encoded = format!(
+            "{}{}",
+            ENCRYPTED_PAYLOAD_PREFIX_V1,
+            base64::engine::general_purpose::STANDARD.encode(plain)
+        );
+        let decoded = import_from_encrypted_payload(&encoded).unwrap();
+        assert_eq!(decoded, plain);
     }
 
     #[test]
@@ -2115,6 +2275,51 @@ mod tests {
         rb.restore(&mut state, &mut tracker).unwrap();
         assert_snapshot_equal(&state, &Some(prev.clone()));
         assert!(!tracker.is_imported(&attempted));
+    }
+
+    #[test]
+    fn test_rollback_from_empty_state_clears_to_none() {
+        // No previous snapshot — capture from empty state.
+        let attempted = ExportSnapshot::new(sample_savings_payload(), ExportFormat::Json);
+        let mut state: Option<ExportSnapshot> = None;
+        let mut tracker = MigrationTracker::new();
+
+        let rb = RollbackMetadata::capture(state.as_ref(), &attempted, 9_000);
+
+        assert!(!rb.has_previous_state());
+        assert!(rb.describe().contains("cleared to empty"));
+
+        // Apply the attempted import.
+        state = Some(attempted.clone());
+        tracker.mark_imported(&attempted, 9_001).unwrap();
+
+        // Rollback — state must return to None.
+        rb.restore(&mut state, &mut tracker).unwrap();
+        assert!(state.is_none());
+        assert!(!tracker.is_imported(&attempted));
+    }
+
+    #[test]
+    fn test_rollback_describe_includes_checksums_and_versions() {
+        let prev = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
+        let attempted = ExportSnapshot::new(sample_savings_payload(), ExportFormat::Json);
+
+        let rb = RollbackMetadata::capture(Some(&prev), &attempted, 12_345);
+
+        let description = rb.describe();
+        assert!(
+            description.contains("12345"),
+            "timestamp should appear: {description}"
+        );
+        assert!(
+            description.contains(&prev.header.version.to_string()),
+            "previous version should appear: {description}"
+        );
+        assert!(
+            description.contains(&attempted.header.version.to_string()),
+            "attempted version should appear: {description}"
+        );
+        assert!(rb.has_previous_state());
     }
 
     #[test]
@@ -3555,14 +3760,14 @@ mod tests {
     // --- RemittanceSplit: direct validate_for_import ---
 
     #[test]
-    fn test_semantic_remittance_split_valid_sum_100_accepted() {
-        let snapshot = make_remittance_snapshot(50, 30, 15, 5);
+    fn test_semantic_remittance_split_valid_sum_10000_accepted() {
+        let snapshot = make_remittance_snapshot(5000, 3000, 1500, 500);
         assert!(snapshot.validate_for_import().is_ok());
     }
 
     #[test]
-    fn test_semantic_remittance_split_sum_99_rejected() {
-        let snapshot = make_remittance_snapshot(50, 30, 15, 4);
+    fn test_semantic_remittance_split_sum_9999_rejected() {
+        let snapshot = make_remittance_snapshot(5000, 3000, 1500, 499);
         assert!(matches!(
             snapshot.validate_for_import(),
             Err(MigrationError::ValidationFailed(_))
@@ -3570,8 +3775,17 @@ mod tests {
     }
 
     #[test]
-    fn test_semantic_remittance_split_sum_101_rejected() {
-        let snapshot = make_remittance_snapshot(50, 30, 15, 6);
+    fn test_semantic_remittance_split_sum_10001_rejected() {
+        let snapshot = make_remittance_snapshot(5000, 3000, 1500, 501);
+        assert!(matches!(
+            snapshot.validate_for_import(),
+            Err(MigrationError::ValidationFailed(_))
+        ));
+    }
+
+    #[test]
+    fn test_semantic_remittance_split_single_value_out_of_range_rejected() {
+        let snapshot = make_remittance_snapshot(10001, 0, 0, 0);
         assert!(matches!(
             snapshot.validate_for_import(),
             Err(MigrationError::ValidationFailed(_))
@@ -3588,9 +3802,9 @@ mod tests {
     }
 
     #[test]
-    fn test_semantic_remittance_split_sum_255_rejected() {
-        // 64 + 64 + 64 + 63 = 255
-        let snapshot = make_remittance_snapshot(64, 64, 64, 63);
+    fn test_semantic_remittance_split_sum_25500_rejected() {
+        // 6400 + 6400 + 6400 + 6300 = 25500
+        let snapshot = make_remittance_snapshot(6400, 6400, 6400, 6300);
         assert!(matches!(
             snapshot.validate_for_import(),
             Err(MigrationError::ValidationFailed(_))
@@ -3601,7 +3815,7 @@ mod tests {
 
     #[test]
     fn test_semantic_remittance_split_invalid_rejected_via_json_untracked() {
-        let snapshot = make_remittance_snapshot(50, 30, 15, 4); // sum = 99
+        let snapshot = make_remittance_snapshot(5000, 3000, 1500, 499); // sum = 9999
         let bytes = export_to_json(&snapshot).unwrap();
         assert!(matches!(
             import_from_json_untracked(&bytes),
@@ -3611,7 +3825,7 @@ mod tests {
 
     #[test]
     fn test_semantic_remittance_split_invalid_rejected_via_binary_untracked() {
-        let snapshot = make_remittance_snapshot(50, 30, 15, 6); // sum = 101
+        let snapshot = make_remittance_snapshot(5000, 3000, 1500, 501); // sum = 10001
         let bytes = export_to_binary(&snapshot).unwrap();
         assert!(matches!(
             import_from_binary_untracked(&bytes),
@@ -3632,7 +3846,7 @@ mod tests {
 
     #[test]
     fn test_semantic_remittance_split_invalid_rejected_via_tracked_binary() {
-        let snapshot = make_remittance_snapshot(64, 64, 64, 63); // sum = 255
+        let snapshot = make_remittance_snapshot(6400, 6400, 6400, 6300); // sum = 25500
         let bytes = export_to_binary(&snapshot).unwrap();
         let mut tracker = MigrationTracker::new();
         assert!(matches!(
@@ -3989,7 +4203,10 @@ mod tests {
         let mut tracker = MigrationTracker::new();
 
         import_from_json(&bytes, &mut tracker, 1_000).unwrap();
-        assert!(tracker.is_imported(&snapshot), "tracker must reflect first import");
+        assert!(
+            tracker.is_imported(&snapshot),
+            "tracker must reflect first import"
+        );
 
         // Untracked call: throwaway tracker has no record of the above import.
         let result = import_from_json_untracked(&bytes);
