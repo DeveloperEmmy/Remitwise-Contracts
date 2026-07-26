@@ -828,6 +828,10 @@ pub enum RateError {
     Overflow,
 }
 
+pub const BPS_PER_PERCENT: u32 = 100;
+pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
+
+
 /// A whole percentage value (1% = 100 basis points).
 ///
 /// `Percent` wraps a `u32` representing whole percentage units. Safe conversions
@@ -922,6 +926,15 @@ impl Rate {
     pub fn from_bps(bps: u32) -> Self {
         Self(bps)
     }
+
+    /// Create a `Rate` from a whole percentage integer value.
+    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
+        percent
+            .checked_mul(BPS_PER_PERCENT)
+            .map(Self::from_bps)
+            .ok_or(RateError::Overflow)
+    }
+
 
     /// Construct a `Rate` from an externally supplied raw value plus unit.
     ///
