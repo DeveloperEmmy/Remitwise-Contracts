@@ -786,6 +786,16 @@ impl ToI128Checked for i32 {
 /// so that integer arithmetic can be used without floating point.
 pub const BASIS_POINTS: u32 = 10_000;
 
+/// Conversion factor from whole percentage points to basis points.
+///
+/// `1% = 100 bps`, so multiplying a whole-percent value by this constant
+/// converts it to basis points. Named `BPS_PER_PERCENT` for clarity at
+/// call sites: "how many BPS are in one percent?".
+pub const BPS_PER_PERCENT: u32 = 100;
+
+/// Alias for [`BPS_PER_PERCENT`] — kept for backwards compatibility.
+pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
+
 /// Supported units for externally supplied rate inputs.
 ///
 /// Remitwise contracts currently accept only basis points. Treating a raw rate
@@ -921,6 +931,32 @@ impl Rate {
     #[inline(always)]
     pub fn from_bps(bps: u32) -> Self {
         Self(bps)
+    }
+
+    /// Construct a `Rate` from a whole percentage integer value.
+    ///
+    /// `percent = 5` → `Rate(500)` (5%).
+    ///
+    /// # Errors
+    /// Returns [`RateError::Overflow`] when `percent * 100` would exceed `u32::MAX`.
+    #[inline(always)]
+    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
+        percent
+            .checked_mul(BPS_PER_PERCENT)
+            .map(Self)
+            .ok_or(RateError::Overflow)
+    }
+
+    /// Construct a `Rate` from a [`Percent`] newtype value.
+    ///
+    /// Equivalent to `percent.to_rate()` — provided here as a symmetric
+    /// constructor on `Rate` so callers can write `Rate::from_percent_type(p)`.
+    ///
+    /// # Errors
+    /// Returns [`RateError::Overflow`] when `percent * 100` would exceed `u32::MAX`.
+    #[inline(always)]
+    pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
+        percent.to_rate()
     }
 
     /// Construct a `Rate` from an externally supplied raw value plus unit.
@@ -1538,6 +1574,230 @@ impl RemitwiseEvents {
             "event data predicate failed for action {:?}",
             expected_action
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared audit-event helper (#1268)
+// ---------------------------------------------------------------------------
+
+/// Emits a standardised audit event carrying `(op, actor, meta)`.
+///
+/// # Purpose
+/// Before this helper existed each contract rolled its own inline
+/// `env.events().publish(...)` call with slightly different topic tuples,
+/// making it impossible for indexers and compliance tools to subscribe to a
+/// single canonical stream of audit events.  `emit_audit` fixes that by
+/// providing **one place** where the schema is defined and enforced.
+///
+/// # Schema
+/// The event is published with a 4-element topic tuple:
+///
+/// ```text
+/// ("Remitwise", EventCategory::Compliance (= 5), EventPriority::High (= 2), "audit")
+/// ```
+///
+/// The data payload is the caller-supplied `meta` value, which must implement
+/// `IntoVal`.  Typical payloads are small structs or plain scalars; the same
+/// 256-byte size budget enforced by [`RemitwiseEvents::emit`] applies here.
+///
+/// # Arguments
+/// * `env`   – Soroban environment.
+/// * `op`    – A short [`Symbol`] identifying the operation being audited
+///             (e.g. `symbol_short!("flow_exec")`).  Must be ≤ 9 bytes
+///             ([`SHORT_SYMBOL_MAX_LEN`]).
+/// * `actor` – The [`Address`] of the principal that triggered the operation.
+/// * `meta`  – An arbitrary `IntoVal` payload carrying operation-specific
+///             context (amount, result, IDs, etc.).  Keep it compact.
+///
+/// # Panics (test-only)
+/// In `#[cfg(test)]` builds the call panics if the serialized `meta` payload
+/// exceeds 256 bytes — the same guard used by [`RemitwiseEvents::emit`].
+///
+/// # Example
+/// ```ignore
+/// use remitwise_common::emit_audit;
+/// use soroban_sdk::symbol_short;
+///
+/// emit_audit(&env, symbol_short!("transfer"), &caller, (amount, success));
+/// ```
+pub fn emit_audit<T>(env: &Env, op: Symbol, actor: &Address, meta: T)
+where
+    T: soroban_sdk::IntoVal<Env, soroban_sdk::Val>,
+{
+    // Fixed topic tuple — every audit event from every contract uses this
+    // identical shape so indexers can subscribe with a single filter.
+    let topics = (
+        symbol_short!("Remitwise"),
+        EventCategory::Compliance.to_u32(), // 5
+        EventPriority::High.to_u32(),       // 2
+        symbol_short!("audit"),
+    );
+
+    // The data tuple encodes (op, actor, meta) so the operation name and
+    // principal are always present in the event payload alongside the
+    // caller-supplied context.
+    let data = (op, actor.clone(), meta);
+
+    // In test builds enforce the same 256-byte payload budget as
+    // RemitwiseEvents::emit so oversized payloads are caught immediately.
+    #[cfg(test)]
+    {
+        use soroban_sdk::xdr::ToXdr;
+        use soroban_sdk::TryFromVal;
+        let val: soroban_sdk::Val = data.into_val(env);
+        if let Ok(sc_val) = soroban_sdk::xdr::ScVal::try_from_val(env, &val) {
+            let size = soroban_sdk::xdr::ToXdr::to_xdr(sc_val, env).len();
+            if size > 256 {
+                panic!(
+                    "emit_audit: meta payload size {} exceeds 256-byte budget. \
+                     Keep audit payloads compact.",
+                    size
+                );
+            }
+        }
+        env.events().publish(topics, val);
+        return;
+    }
+
+    #[cfg(not(test))]
+    env.events().publish(topics, data);
+}
+
+#[cfg(test)]
+mod emit_audit_tests {
+    use super::*;
+    use soroban_sdk::{symbol_short, testutils::Address as _, Env};
+
+    // -----------------------------------------------------------------------
+    // Schema / topic tests
+    // -----------------------------------------------------------------------
+
+    /// The emitted event carries a 4-element topic tuple whose first element
+    /// is the "Remitwise" sentinel symbol.
+    #[test]
+    fn emit_audit_event_has_remitwise_sentinel_topic() {
+        let env = Env::default();
+        let actor = Address::generate(&env);
+        emit_audit(&env, symbol_short!("xfer"), &actor, 1u32);
+
+        let events = env.events().all();
+        assert!(!events.is_empty());
+        let (_cid, topics, _data) = events.last().unwrap();
+        assert_eq!(topics.len(), 4, "audit event must have 4 topics");
+
+        let sentinel: Symbol = soroban_sdk::FromVal::from_val(&env, &topics.get(0).unwrap());
+        assert_eq!(sentinel, symbol_short!("Remitwise"));
+    }
+
+    /// Category must be `EventCategory::Compliance` (discriminant 5).
+    #[test]
+    fn emit_audit_event_uses_compliance_category() {
+        let env = Env::default();
+        let actor = Address::generate(&env);
+        emit_audit(&env, symbol_short!("op"), &actor, 0u32);
+
+        let events = env.events().all();
+        let (_cid, topics, _data) = events.last().unwrap();
+        let cat: u32 = soroban_sdk::FromVal::from_val(&env, &topics.get(1).unwrap());
+        assert_eq!(
+            cat,
+            EventCategory::Compliance.to_u32(),
+            "audit events must use EventCategory::Compliance"
+        );
+    }
+
+    /// Priority must be `EventPriority::High` (discriminant 2).
+    #[test]
+    fn emit_audit_event_uses_high_priority() {
+        let env = Env::default();
+        let actor = Address::generate(&env);
+        emit_audit(&env, symbol_short!("op"), &actor, 0u32);
+
+        let events = env.events().all();
+        let (_cid, topics, _data) = events.last().unwrap();
+        let prio: u32 = soroban_sdk::FromVal::from_val(&env, &topics.get(2).unwrap());
+        assert_eq!(
+            prio,
+            EventPriority::High.to_u32(),
+            "audit events must use EventPriority::High"
+        );
+    }
+
+    /// The fourth topic element must be the literal `"audit"` symbol.
+    #[test]
+    fn emit_audit_event_action_topic_is_audit_symbol() {
+        let env = Env::default();
+        let actor = Address::generate(&env);
+        emit_audit(&env, symbol_short!("settle"), &actor, 42u32);
+
+        let events = env.events().all();
+        let (_cid, topics, _data) = events.last().unwrap();
+        let action: Symbol = soroban_sdk::FromVal::from_val(&env, &topics.get(3).unwrap());
+        assert_eq!(action, symbol_short!("audit"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Payload tests
+    // -----------------------------------------------------------------------
+
+    /// A compact scalar payload (u32) is published without error.
+    #[test]
+    fn emit_audit_accepts_scalar_meta_payload() {
+        let env = Env::default();
+        let actor = Address::generate(&env);
+        // Must not panic.
+        emit_audit(&env, symbol_short!("approve"), &actor, 100u32);
+        assert!(!env.events().all().is_empty());
+    }
+
+    /// A tuple payload (amount + bool) is accepted — typical audit call-site pattern.
+    #[test]
+    fn emit_audit_accepts_tuple_meta_payload() {
+        let env = Env::default();
+        let actor = Address::generate(&env);
+        emit_audit(&env, symbol_short!("flow"), &actor, (1_000i128, true));
+        assert!(!env.events().all().is_empty());
+    }
+
+    /// Multiple audit events emitted in sequence are all present in
+    /// `env.events().all()` and each carries the canonical topic shape.
+    #[test]
+    fn emit_audit_multiple_events_are_all_recorded() {
+        let env = Env::default();
+        let actor = Address::generate(&env);
+        emit_audit(&env, symbol_short!("op1"), &actor, 1u32);
+        emit_audit(&env, symbol_short!("op2"), &actor, 2u32);
+        emit_audit(&env, symbol_short!("op3"), &actor, 3u32);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 3, "all three audit events must be recorded");
+
+        for (_cid, topics, _data) in events.iter() {
+            assert_eq!(topics.len(), 4);
+            let sentinel: Symbol = soroban_sdk::FromVal::from_val(&env, &topics.get(0).unwrap());
+            assert_eq!(sentinel, symbol_short!("Remitwise"));
+            let cat: u32 = soroban_sdk::FromVal::from_val(&env, &topics.get(1).unwrap());
+            assert_eq!(cat, EventCategory::Compliance.to_u32());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Size-budget enforcement (test-only guard)
+    // -----------------------------------------------------------------------
+
+    /// An oversized meta payload (> 256 bytes) must panic in test builds.
+    #[test]
+    #[should_panic(expected = "exceeds 256-byte budget")]
+    fn emit_audit_panics_on_oversized_meta_payload() {
+        let env = Env::default();
+        let actor = Address::generate(&env);
+        // Build a Vec<u32> large enough to exceed 256 XDR bytes.
+        let mut big: soroban_sdk::Vec<u32> = soroban_sdk::Vec::new(&env);
+        for i in 0u32..100 {
+            big.push_back(i);
+        }
+        emit_audit(&env, symbol_short!("big"), &actor, big);
     }
 }
 
