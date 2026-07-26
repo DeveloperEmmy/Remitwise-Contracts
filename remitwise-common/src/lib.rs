@@ -1,6 +1,7 @@
 #![no_std]
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+use soroban_sdk::{contracterror, contracttype, symbol_short, Bytes, BytesN, Symbol};
 pub mod tokens;
 pub use tokens::{
     SupportedToken, BASE_UNITS_PER_EURC, BASE_UNITS_PER_USDC, DEFAULT_CURRENCY, EURC_DECIMALS,
@@ -1151,6 +1152,22 @@ pub fn verify_signature(
 ) -> Result<(), SignatureError> {
     require_registered_verifier(env, public_key)?;
 
+    let mut prefixed_message = Bytes::new(env);
+    prefixed_message.extend_from_slice(domain_separator);
+    prefixed_message.extend_from_slice(message);
+
+    let sig_bytes: BytesN<64> = {
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(signature);
+        BytesN::from_array(env, &arr)
+    };
+    let pk_bytes: BytesN<32> = {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(public_key);
+        BytesN::from_array(env, &arr)
+    };
+
+    env.crypto().ed25519_verify(&pk_bytes, &prefixed_message, &sig_bytes);
     let pk_arr: [u8; 32] = public_key
         .try_into()
         .map_err(|_| SignatureError::InvalidPublicKeyLength)?;
