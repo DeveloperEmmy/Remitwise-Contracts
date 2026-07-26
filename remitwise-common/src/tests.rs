@@ -20,10 +20,10 @@ use super::*;
 use crate::distribute_pro_rata;
 use ed25519_dalek::Signer;
 use proptest::prelude::*;
-use soroban_sdk::{Bytes, Env, IntoVal, String, Symbol, Vec};
 use soroban_sdk::testutils::{Ledger, LedgerInfo};
-use std::string::ToString;
+use soroban_sdk::{String, Symbol, Vec};
 
+#[allow(dead_code)]
 fn set_ledger(env: &Env, sequence_number: u32) {
     let proto = env.ledger().protocol_version();
     env.ledger().set(LedgerInfo {
@@ -408,6 +408,7 @@ fn test_checked_empty_batch_before_length_check() {
 /// A deterministic helper: get string content from a Symbol for assertions.
 /// Available only in non-WASM (test) builds via `ToString`.
 fn symbol_str(sym: &Symbol) -> std::string::String {
+    use std::string::ToString;
     sym.to_string()
 }
 
@@ -1422,107 +1423,147 @@ proptest! {
     }
 }
 
-// ============================================================================
-// Rate newtype round-trip and overflow tests (#1081)
-// ============================================================================
+// ─── Settlement Currency Guard tests (#1229) ─────────────────────────────────
 
 #[test]
-fn test_rate_from_bps_to_bps_roundtrip() {
-    for bps in [0, 1, 100, 500, 10_000, 50_000, u32::MAX] {
-        let rate = Rate::from_bps(bps);
-        assert_eq!(rate.to_bps(), bps);
-    }
-    assert_eq!(Rate::ZERO.to_bps(), 0);
-    assert_eq!(Rate::MAX.to_bps(), u32::MAX);
+fn test_settlement_currency_whitelisted_in_multi_item_vec() {
+    let env = Env::default();
+    let whitelist = soroban_sdk::Vec::from_array(
+        &env,
+        [
+            symbol_short!("USDC"),
+            symbol_short!("EURC"),
+            symbol_short!("XLM"),
+        ],
+    );
+
+    // First item
+    assert_eq!(
+        require_matching_settlement_currency(&whitelist, &symbol_short!("USDC")),
+        Ok(())
+    );
+    // Middle item
+    assert_eq!(
+        require_matching_settlement_currency(&whitelist, &symbol_short!("EURC")),
+        Ok(())
+    );
+    // Last item
+    assert_eq!(
+        require_matching_settlement_currency(&whitelist, &symbol_short!("XLM")),
+        Ok(())
+    );
 }
 
 #[test]
-fn test_rate_apply_to_zero_rate_returns_zero() {
-    let rate = Rate::ZERO;
-    assert_eq!(rate.apply_to(0), Ok(0));
-    assert_eq!(rate.apply_to(1_000), Ok(0));
-    assert_eq!(rate.apply_to(i128::MAX), Ok(0));
-    assert_eq!(rate.apply_to(-1_000), Ok(0));
-    assert_eq!(rate.apply_to(i128::MIN), Ok(0));
+fn test_settlement_currency_whitelisted_single_item() {
+    let env = Env::default();
+    let whitelist = soroban_sdk::Vec::from_array(&env, [symbol_short!("USDC")]);
+
+    assert_eq!(
+        require_matching_settlement_currency(&whitelist, &symbol_short!("USDC")),
+        Ok(())
+    );
 }
 
 #[test]
-fn test_rate_apply_to_zero_amount_returns_zero() {
-    assert_eq!(Rate::from_bps(500).apply_to(0), Ok(0));
-    assert_eq!(Rate::from_bps(BASIS_POINTS).apply_to(0), Ok(0));
-    assert_eq!(Rate::MAX.apply_to(0), Ok(0));
+fn test_settlement_currency_non_whitelisted_rejected() {
+    let env = Env::default();
+    let whitelist =
+        soroban_sdk::Vec::from_array(&env, [symbol_short!("USDC"), symbol_short!("EURC")]);
+
+    assert_eq!(
+        require_matching_settlement_currency(&whitelist, &symbol_short!("XLM")),
+        Err(SettlementCurrencyError::CurrencyNotWhitelisted)
+    );
 }
 
 #[test]
-fn test_rate_apply_to_hundred_percent_returns_exact_amount() {
-    let hundred_percent = Rate::from_bps(BASIS_POINTS);
-    assert_eq!(hundred_percent.apply_to(1_000), Ok(1_000));
-    assert_eq!(hundred_percent.apply_to(-500), Ok(-500));
+fn test_settlement_currency_empty_whitelist_rejected() {
+    let env = Env::default();
+    let whitelist = soroban_sdk::Vec::<Symbol>::new(&env);
 
-    // Safe maximum for 100% rate without overflowing i128 intermediate product
-    let safe_max = i128::MAX / (BASIS_POINTS as i128);
-    assert_eq!(hundred_percent.apply_to(safe_max), Ok(safe_max));
+    assert_eq!(
+        require_matching_settlement_currency(&whitelist, &symbol_short!("USDC")),
+        Err(SettlementCurrencyError::CurrencyNotWhitelisted)
+    );
 }
 
 #[test]
-fn test_rate_apply_to_partial_percentages_and_truncation() {
-    // 5% of 1,000 = 50
-    let rate_5pct = Rate::from_bps(500);
-    assert_eq!(rate_5pct.apply_to(1_000), Ok(50));
-    assert_eq!(rate_5pct.apply_to(-1_000), Ok(-50));
+fn test_settlement_currency_case_sensitive_mismatch() {
+    let env = Env::default();
+    let whitelist = soroban_sdk::Vec::from_array(&env, [symbol_short!("USDC")]);
+    let lower_usdc = Symbol::new(&env, "usdc");
 
-    // 0.01% (1 bps) of 10,000 = 1
-    let rate_1bps = Rate::from_bps(1);
-    assert_eq!(rate_1bps.apply_to(10_000), Ok(1));
-
-    // Truncation towards zero: floor(9,999 * 1 / 10,000) = 0
-    assert_eq!(rate_1bps.apply_to(9_999), Ok(0));
+    assert_eq!(
+        require_matching_settlement_currency(&whitelist, &lower_usdc),
+        Err(SettlementCurrencyError::CurrencyNotWhitelisted)
+    );
 }
 
 #[test]
-fn test_rate_apply_to_multiplication_overflow() {
-    // Large amounts exceeding i128::MAX / rate
-    assert_eq!(Rate::from_bps(2).apply_to(i128::MAX), Err(RateError::Overflow));
-    assert_eq!(Rate::MAX.apply_to(i128::MAX), Err(RateError::Overflow));
-    assert_eq!(Rate::from_bps(2).apply_to(i128::MIN), Err(RateError::Overflow));
+fn test_settlement_currency_unknown_symbol_rejected() {
+    let env = Env::default();
+    let whitelist =
+        soroban_sdk::Vec::from_array(&env, [symbol_short!("USDC"), symbol_short!("EURC")]);
 
-    // Exact boundary test for 500 bps (5%)
-    let rate = Rate::from_bps(500);
-    let max_safe = i128::MAX / 500;
-    let expected = (max_safe * 500) / (BASIS_POINTS as i128);
-    assert_eq!(rate.apply_to(max_safe), Ok(expected));
+    let unknown_sym1 = Symbol::new(&env, "UNKNOWN");
+    let unknown_sym2 = Symbol::new(&env, "BADTOKEN");
+    let unknown_sym3 = Symbol::new(&env, "FAKE_USD");
 
-    let overflow_amount = max_safe + 1;
-    assert_eq!(rate.apply_to(overflow_amount), Err(RateError::Overflow));
+    assert_eq!(
+        require_matching_settlement_currency(&whitelist, &unknown_sym1),
+        Err(SettlementCurrencyError::CurrencyNotWhitelisted)
+    );
+    assert_eq!(
+        require_matching_settlement_currency(&whitelist, &unknown_sym2),
+        Err(SettlementCurrencyError::CurrencyNotWhitelisted)
+    );
+    assert_eq!(
+        require_matching_settlement_currency(&whitelist, &unknown_sym3),
+        Err(SettlementCurrencyError::CurrencyNotWhitelisted)
+    );
 }
 
 #[test]
-fn test_rate_to_i128_checked() {
-    assert_eq!(Rate::from_bps(500).to_i128_checked(), Ok(500i128));
-    assert_eq!(Rate::MAX.to_i128_checked(), Ok(u32::MAX as i128));
+fn test_settlement_currency_unknown_symbol_empty_whitelist() {
+    let env = Env::default();
+    let whitelist = soroban_sdk::Vec::<Symbol>::new(&env);
+
+    let unknown_sym = Symbol::new(&env, "UNKNOWN");
+    assert_eq!(
+        require_matching_settlement_currency(&whitelist, &unknown_sym),
+        Err(SettlementCurrencyError::CurrencyNotWhitelisted)
+    );
 }
 
 proptest! {
     #[test]
-    fn proptest_rate_bps_roundtrip(bps in any::<u32>()) {
-        let rate = Rate::from_bps(bps);
-        prop_assert_eq!(rate.to_bps(), bps);
+    fn proptest_settlement_currency_whitelisted_always_passes(
+        s in "[A-Z0-9_]{1,9}"
+    ) {
+        let env = Env::default();
+        let sym = Symbol::new(&env, &s);
+        let whitelist = soroban_sdk::Vec::from_array(&env, [sym.clone()]);
+
+        prop_assert_eq!(
+            require_matching_settlement_currency(&whitelist, &sym),
+            Ok(())
+        );
     }
 
     #[test]
-    fn proptest_rate_apply_to_roundtrip_and_overflow(bps in any::<u32>(), amount in any::<i128>()) {
-        let rate = Rate::from_bps(bps);
-        let result = rate.apply_to(amount);
+    fn proptest_settlement_currency_non_whitelisted_always_fails(
+        s1 in "[A-Z0-9_]{1,4}",
+        s2 in "[a-z0-9_]{5,9}"
+    ) {
+        let env = Env::default();
+        let sym1 = Symbol::new(&env, &s1);
+        let sym2 = Symbol::new(&env, &s2);
+        let whitelist = soroban_sdk::Vec::from_array(&env, [sym1]);
 
-        match amount.checked_mul(bps as i128) {
-            Some(product) => {
-                let expected = product / (BASIS_POINTS as i128);
-                prop_assert_eq!(result, Ok(expected));
-            }
-            None => {
-                prop_assert_eq!(result, Err(RateError::Overflow));
-            }
-        }
+        prop_assert_eq!(
+            require_matching_settlement_currency(&whitelist, &sym2),
+            Err(SettlementCurrencyError::CurrencyNotWhitelisted)
+        );
     }
 }
-

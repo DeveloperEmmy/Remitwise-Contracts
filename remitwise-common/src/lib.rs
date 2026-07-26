@@ -593,6 +593,52 @@ pub fn require_matching_settlement_currency_with_config(
     Err(SettlementCurrencyError::CurrencyNotWhitelisted)
 }
 
+/// Canonicalizes a single label string into a `Symbol`.
+///
+/// Rules:
+/// - Leading and trailing ASCII whitespace is stripped.
+/// - ASCII uppercase letters are folded to lowercase.
+/// - The result must satisfy `Symbol`'s charset (`[a-zA-Z0-9_]` after folding)
+///   and length (`1..=32` bytes after trimming), otherwise this panics.
+pub fn canonicalise_symbol(env: &soroban_sdk::Env, input: &soroban_sdk::String) -> Symbol {
+    let len = input.len();
+    if len == 0 {
+        panic!("symbol input must contain between 1 and 32 characters after trimming");
+    }
+    let mut buf = [0u8; 256];
+    if len as usize > buf.len() {
+        panic!("symbol input is too long");
+    }
+    input.copy_into_slice(&mut buf[..len as usize]);
+
+    let s = core::str::from_utf8(&buf[..len as usize])
+        .unwrap_or_else(|_| panic!("symbol input is not valid UTF-8"));
+
+    let trimmed = s.trim();
+    let trimmed_len = trimmed.len();
+    if trimmed_len == 0 {
+        panic!("symbol input must contain at least one non-whitespace character");
+    }
+    if trimmed_len > 32 {
+        panic!("symbol input must contain between 1 and 32 characters after trimming");
+    }
+
+    let trimmed_bytes = trimmed.as_bytes();
+    let mut canonical = [0u8; 32];
+    for (i, &byte) in trimmed_bytes.iter().enumerate() {
+        canonical[i] = if byte.is_ascii_uppercase() {
+            byte.to_ascii_lowercase()
+        } else {
+            byte
+        };
+    }
+
+    let canonical_str = core::str::from_utf8(&canonical[..trimmed_len])
+        .unwrap_or_else(|_| panic!("canonicalised symbol is not valid UTF-8"));
+
+    Symbol::new(env, canonical_str)
+}
+
 #[cfg(test)]
 mod settlement_currency_tests {
     use super::*;
@@ -1091,6 +1137,10 @@ pub const BASIS_POINTS: u32 = 10_000;
 pub const BPS_PER_PERCENT: u32 = 100;
 pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
 
+/// Number of basis points in one percentage point (1% = 100 bps).
+pub const BPS_PER_PERCENT: u32 = 100;
+pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
+
 /// Supported units for externally supplied rate inputs.
 ///
 /// Remitwise contracts currently accept only basis points. Treating a raw rate
@@ -1232,8 +1282,7 @@ impl Rate {
         Self(bps)
     }
 
-    /// Create a `Rate` from a whole percentage value.
-    #[inline(always)]
+    /// Create a `Rate` from a whole percentage value (`percent * 100` bps).
     pub fn from_percent(percent: u32) -> Result<Self, RateError> {
         percent
             .checked_mul(BPS_PER_PERCENT)
@@ -1241,8 +1290,7 @@ impl Rate {
             .ok_or(RateError::Overflow)
     }
 
-    /// Create a `Rate` from a strongly-typed `Percent`.
-    #[inline(always)]
+    /// Create a `Rate` from a [`Percent`] type.
     pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
         percent.to_rate()
     }
@@ -2029,6 +2077,8 @@ impl RemitwiseEvents {
 
         #[cfg(test)]
         {
+            #[allow(unused_imports)]
+            use soroban_sdk::xdr::ToXdr;
             use soroban_sdk::TryFromVal;
             let val: soroban_sdk::Val = data.into_val(env);
             if let Ok(sc_val) = soroban_sdk::xdr::ScVal::try_from_val(env, &val) {
