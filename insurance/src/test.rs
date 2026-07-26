@@ -576,7 +576,7 @@ mod tests {
         let (c, _contract_owner) = setup_with_owner(&env);
         let owner = Address::generate(&env);
 
-        let p1 = c.create_policy(
+        let _p1 = c.create_policy(
             &owner,
             &n(&env, "P1"),
             &CoverageType::Health,
@@ -590,7 +590,7 @@ mod tests {
             &5_000_000i128,
             &50_000_000i128,
         );
-        let p3 = c.create_policy(
+        let _p3 = c.create_policy(
             &owner,
             &n(&env, "P3"),
             &CoverageType::Health,
@@ -1152,7 +1152,7 @@ mod tests {
         // Create and deactivate 25 policies (> DEFAULT_PAGE_LIMIT=20).
         let total: u32 = DEFAULT_PAGE_LIMIT + 5;
         for i in 0..total {
-            let name = String::from_str(&env, &format!("P{}", i));
+            let name = String::from_str(&env, &std::format!("P{}", i));
             let id = c.create_policy(
                 &owner,
                 &name,
@@ -1194,7 +1194,7 @@ mod tests {
 
         let total: u32 = MAX_PAGE_LIMIT + 5;
         for i in 0..total {
-            let name = String::from_str(&env, &format!("P{}", i));
+            let name = String::from_str(&env, &std::format!("P{}", i));
             let id = c.create_policy(
                 &owner,
                 &name,
@@ -1234,7 +1234,7 @@ mod tests {
         // Seed more records than the requested limit.
         let total: u32 = requested_limit + 3;
         for i in 0..total {
-            let name = String::from_str(&env, &format!("P{}", i));
+            let name = String::from_str(&env, &std::format!("P{}", i));
             let id = c.create_policy(
                 &owner,
                 &name,

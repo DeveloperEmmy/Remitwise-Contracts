@@ -2482,7 +2482,6 @@ fn test_initialize_split_percentages_invalid_sum() {
 }
 
 #[test]
-#[test]
 fn test_initialize_split_rejects_unsupported_ingress_token() {
     let env = Env::default();
     env.mock_all_auths();
@@ -2514,7 +2513,7 @@ fn test_update_split_percentage_out_of_range() {
     let owner = Address::generate(&env);
     let token_addr = Address::generate(&env);
 
-    let result = client.try_initialize_split(&owner, &0, &token_addr, &4000, &3000, &2000, &1000);
+    let _result = client.try_initialize_split(&owner, &0, &token_addr, &4000, &3000, &2000, &1000);
 
     // Try to update with spending_percent > 10_000
     let result = client.try_update_split(&owner, &1, &10_001, &0, &0, &0);
