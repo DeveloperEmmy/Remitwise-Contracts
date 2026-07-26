@@ -1372,12 +1372,13 @@ impl Rate {
         Self(bps)
     }
 
-    /// Create a `Rate` from a whole percentage integer value.
+    /// Create a `Rate` from a whole percentage integer value (1 = 1%).
+    #[inline(always)]
     pub fn from_percent(percent: u32) -> Result<Self, RateError> {
         percent
             .checked_mul(BPS_PER_PERCENT)
-            .map(Self::from_bps)
             .ok_or(RateError::Overflow)
+            .map(Self::from_bps)
     }
 
     /// Construct a `Rate` from an externally supplied raw value plus unit.

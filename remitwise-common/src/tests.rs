@@ -1459,6 +1459,26 @@ fn test_rate_from_percent() {
 }
 
 #[test]
+fn test_rate_from_percent_boundaries() {
+    // 0%
+    assert_eq!(Rate::from_percent(0), Ok(Rate::from_bps(0)));
+
+    // 0.01% is 1 basis point. `from_percent` only takes whole percentages,
+    // so fractional percentages must be constructed via `from_bps`.
+    let point_zero_one = Rate::from_bps(1);
+    assert!(point_zero_one.has_fractional_percent());
+    assert_eq!(point_zero_one.to_percent(), 0);
+
+    // 100%
+    assert_eq!(Rate::from_percent(100), Ok(Rate::from_bps(10_000)));
+
+    // 100.01% is 10,001 basis points.
+    let hundred_point_zero_one = Rate::from_bps(10_001);
+    assert!(hundred_point_zero_one.has_fractional_percent());
+    assert_eq!(hundred_point_zero_one.to_percent(), 100);
+}
+
+#[test]
 fn test_rate_to_percent_and_fractional() {
     let rate_0 = Rate::from_bps(0);
     assert_eq!(rate_0.to_percent(), 0);
