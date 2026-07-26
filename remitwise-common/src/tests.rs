@@ -21,8 +21,9 @@ use super::*;
 use crate::distribute_pro_rata;
 use ed25519_dalek::Signer;
 use proptest::prelude::*;
-use soroban_sdk::{Bytes, Env, IntoVal, String, Symbol, Vec};
 use soroban_sdk::testutils::{Ledger, LedgerInfo};
+use soroban_sdk::{Env, String, Symbol, Vec};
+use std::string::ToString;
 
 #[allow(dead_code)]
 fn set_ledger(env: &Env, sequence_number: u32) {
@@ -820,6 +821,89 @@ fn test_timestamp_seconds_until_past_target_saturates() {
 #[test]
 fn test_timestamp_seconds_until_u64_max_boundary() {
     assert_eq!(Timestamp::seconds_until(u64::MAX - 1, u64::MAX), 1);
+}
+
+// ─── Current, Future, Past Temporal Tests (Timestamp & validate_period) ──────
+
+/// validate_period returns Ok when start equals end (current/same timestamp).
+#[test]
+fn test_validate_period_returns_ok_for_current_timestamp_equal_start_end() {
+    assert_eq!(validate_period(1_700_000_000, 1_700_000_000), Ok(()));
+}
+
+/// validate_period returns Ok when start is before end (future end timestamp).
+#[test]
+fn test_validate_period_returns_ok_for_future_end_timestamp() {
+    assert_eq!(validate_period(1_700_000_000, 1_700_000_500), Ok(()));
+}
+
+/// validate_period returns Err(TimeError::InvalidPeriod) when start is after end (past end timestamp).
+#[test]
+fn test_validate_period_returns_err_invalid_period_for_past_end_timestamp() {
+    assert_eq!(
+        validate_period(1_700_000_500, 1_700_000_000),
+        Err(TimeError::InvalidPeriod)
+    );
+}
+
+/// validate_period boundary checks for 1 second difference (future vs past).
+#[test]
+fn test_validate_period_boundary_one_second_future_and_past() {
+    let now = 1_700_000_000;
+    // 1 second in the future is valid
+    assert_eq!(validate_period(now, now + 1), Ok(()));
+    // 1 second in the past relative to start is invalid
+    assert_eq!(validate_period(now + 1, now), Err(TimeError::InvalidPeriod));
+}
+
+/// Timestamp::seconds_until explicit classification across current, future, and past.
+#[test]
+fn test_timestamp_seconds_until_current_future_past_boundaries() {
+    let now = 1_700_000_000;
+    // Current (now == target)
+    assert_eq!(Timestamp::seconds_until(now, now), 0);
+    // Future (now < target)
+    assert_eq!(Timestamp::seconds_until(now, now + 100), 100);
+    // Past (now > target)
+    assert_eq!(Timestamp::seconds_until(now + 100, now), 0);
+}
+
+proptest! {
+    /// Property test pinning `Timestamp::seconds_until` behavior across current, future, and past targets.
+    #[test]
+    fn proptest_timestamp_seconds_until_current_future_past(
+        now in any::<u64>(),
+        target in any::<u64>(),
+    ) {
+        let result = Timestamp::seconds_until(now, target);
+        if target > now {
+            // Future target: returns exact positive distance
+            prop_assert_eq!(result, target - now);
+            prop_assert!(result > 0);
+        } else if target == now {
+            // Current target: returns zero
+            prop_assert_eq!(result, 0);
+        } else {
+            // Past target: saturates at zero
+            prop_assert_eq!(result, 0);
+        }
+    }
+
+    /// Property test pinning `validate_period` behavior across current, future, and past ordering.
+    #[test]
+    fn proptest_validate_period_current_future_past(
+        start in any::<u64>(),
+        end in any::<u64>(),
+    ) {
+        let res = validate_period(start, end);
+        if start <= end {
+            // Current (start == end) or Future (start < end) range: valid
+            prop_assert_eq!(res, Ok(()));
+        } else {
+            // Past (start > end) range: invalid period error
+            prop_assert_eq!(res, Err(TimeError::InvalidPeriod));
+        }
+    }
 }
 
 // ─── verify_signature tests ──────────────────────────────────────────────────
