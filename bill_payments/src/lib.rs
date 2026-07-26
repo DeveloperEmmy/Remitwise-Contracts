@@ -206,7 +206,7 @@ pub enum BillPaymentsError {
     /// The page is empty so there is no first item to return.
     EmptyPage = 29,
     /// Bill or schedule name is invalid (empty or exceeds max length)
-    InvalidName = 30
+    InvalidName = 30,
 }
 
 pub type Error = BillPaymentsError;

@@ -1,7 +1,8 @@
-#![allow(clippy::all, mismatched_lifetime_syntaxes)]
+#![allow(clippy::all)]
 #[cfg(test)]
 mod tests {
     use crate::*;
+    extern crate alloc;
     use remitwise_common::CoverageType;
     use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, Env, String, Vec};
 
@@ -576,7 +577,7 @@ mod tests {
         let (c, _contract_owner) = setup_with_owner(&env);
         let owner = Address::generate(&env);
 
-        let p1 = c.create_policy(
+        let _p1 = c.create_policy(
             &owner,
             &n(&env, "P1"),
             &CoverageType::Health,
@@ -590,7 +591,7 @@ mod tests {
             &5_000_000i128,
             &50_000_000i128,
         );
-        let p3 = c.create_policy(
+        let _p3 = c.create_policy(
             &owner,
             &n(&env, "P3"),
             &CoverageType::Health,
