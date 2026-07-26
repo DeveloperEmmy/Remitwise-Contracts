@@ -816,6 +816,11 @@ impl ToI128Checked for i32 {
 /// so that integer arithmetic can be used without floating point.
 pub const BASIS_POINTS: u32 = 10_000;
 
+/// Number of basis points in one whole percent (1% = 100 bps).
+pub const BPS_PER_PERCENT: u32 = 100;
+
+/// Alias for `BPS_PER_PERCENT`.
+pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
 /// Supported units for externally supplied rate inputs.
 ///
 /// Remitwise contracts currently accept only basis points. Treating a raw rate
@@ -951,6 +956,22 @@ impl Rate {
     #[inline(always)]
     pub fn from_bps(bps: u32) -> Self {
         Self(bps)
+    }
+
+    /// Create a `Rate` from a whole percentage integer.
+    /// Returns `Err(RateError::Overflow)` if `percent * BPS_PER_PERCENT` exceeds `u32::MAX`.
+    #[inline(always)]
+    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
+        percent
+            .checked_mul(BPS_PER_PERCENT)
+            .map(Self::from_bps)
+            .ok_or(RateError::Overflow)
+    }
+
+    /// Create a `Rate` from a strongly-typed [`Percent`].
+    #[inline(always)]
+    pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
+        Self::from_percent(percent.to_percentage())
     }
 
     /// Construct a `Rate` from an externally supplied raw value plus unit.
