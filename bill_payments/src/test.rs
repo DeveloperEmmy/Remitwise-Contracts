@@ -3877,4 +3877,37 @@ mod testsuit {
         // Soroban SDK no longer exposes `cost_estimate` on Env in this test context.
         // The test remains as a placeholder for future cost estimate support.
     }
+
+    #[test]
+    fn test_paused_since_and_pause_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        client.set_pause_admin(&admin, &admin);
+
+        assert_eq!(client.get_paused_since(), None);
+        let initial_state = client.get_pause_state();
+        assert!(!initial_state.paused);
+        assert_eq!(initial_state.paused_since, None);
+
+        let now = 12_345_678u64;
+        env.ledger().set_timestamp(now);
+        client.pause(&admin);
+
+        assert_eq!(client.get_paused_since(), Some(now));
+        let paused_state = client.get_pause_state();
+        assert!(paused_state.paused);
+        assert_eq!(paused_state.paused_since, Some(now));
+
+        client.unpause(&admin);
+
+        assert_eq!(client.get_paused_since(), None);
+        let unpaused_state = client.get_pause_state();
+        assert!(!unpaused_state.paused);
+        assert_eq!(unpaused_state.paused_since, None);
+    }
 }

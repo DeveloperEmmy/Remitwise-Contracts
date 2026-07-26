@@ -98,6 +98,7 @@ The following keys are used consistently across multiple contracts:
 |-----|---------|---------|
 | `PAUSE_ADM` | Pause admin address | remittance_split, savings_goals, bill_payments, insurance, family_wallet |
 | `PAUSED` | Global pause flag | remittance_split, savings_goals, bill_payments, insurance, family_wallet |
+| `PAUSED_AT` | Global pause timestamp | remittance_split, bill_payments, emergency_killswitch, savings_goals |
 | `UPG_ADM` | Upgrade admin address | remittance_split, savings_goals, bill_payments, insurance, family_wallet |
 | `VERSION` | Contract version | remittance_split, savings_goals, bill_payments, insurance, family_wallet |
 | `NEXT_ID` | Next entity ID counter | savings_goals, bill_payments, insurance |

@@ -67,6 +67,14 @@ pub enum PolicyMode {
     Strict = 1,
 }
 
+/// Detailed pause state including boolean status and timestamp when paused.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PauseState {
+    pub paused: bool,
+    pub paused_since: Option<u64>,
+}
+
 /// Event categories used for logging across all contracts.
 ///
 /// Determines the high-level classification of an event. The taxonomy is documented in
@@ -186,6 +194,9 @@ pub const CONTRACT_VERSION: u32 = 1;
 
 /// Storage key for the pause channels map
 pub const STORAGE_PAUSE_CHANNELS: &str = "PAUSE_CH";
+
+/// Storage key for the global paused_since timestamp
+pub const STORAGE_PAUSED_AT: &str = "PAUSED_AT";
 
 /// Maximum batch size for operations
 pub const MAX_BATCH_SIZE: u32 = 50;
@@ -1266,7 +1277,6 @@ pub enum RateError {
 pub const BPS_PER_PERCENT: u32 = 100;
 pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
 
-
 /// A whole percentage value (1% = 100 basis points).
 ///
 /// `Percent` wraps a `u32` representing whole percentage units. Safe conversions
@@ -1363,15 +1373,10 @@ impl Rate {
     }
 
     /// Create a `Rate` from a whole percentage integer value.
-    ///
-    /// Performs `percent * BPS_PER_PERCENT` with checked arithmetic. Returns
-    /// `Err(RateError::Overflow)` when the result would exceed `u32::MAX`,
-    /// matching the overflow contract used by [`Percent::to_bps`].
-    #[inline(always)]
     pub fn from_percent(percent: u32) -> Result<Self, RateError> {
         percent
             .checked_mul(BPS_PER_PERCENT)
-            .map(Self)
+            .map(Self::from_bps)
             .ok_or(RateError::Overflow)
     }
 
