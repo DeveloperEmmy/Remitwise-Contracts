@@ -1311,6 +1311,12 @@ pub fn require_registered_verifier(env: &Env, public_key: &[u8]) -> Result<(), S
 
 /// Verify an Ed25519 signature with domain separation.
 ///
+/// The payload is encoded as a length-delimited byte stream so adjacent or
+/// overlapping separators/messages cannot collide. For example, the pair
+/// `(domain="ab", message="cdef")` and `(domain="abc", message="def")`
+/// produce different payloads even though their plain concatenation would be
+/// identical.
+///
 /// # Arguments
 /// * `env` - Soroban environment
 /// * `domain_separator` - Domain separator to prevent cross-domain replay attacks
@@ -1353,7 +1359,13 @@ pub fn verify_signature(
         .try_into()
         .map_err(|_| SignatureError::InvalidSignatureLength)?;
 
-    let mut msg_bytes = Bytes::from_slice(env, domain_separator);
+    let mut msg_bytes = Bytes::new(env);
+    let domain_len = (domain_separator.len() as u64).to_le_bytes();
+    let message_len = (message.len() as u64).to_le_bytes();
+
+    msg_bytes.extend_from_slice(&domain_len);
+    msg_bytes.extend_from_slice(domain_separator);
+    msg_bytes.extend_from_slice(&message_len);
     msg_bytes.extend_from_slice(message);
 
     let sig_bytes = soroban_sdk::BytesN::from_array(env, &sig_arr);
