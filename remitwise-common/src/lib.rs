@@ -104,7 +104,7 @@ pub const MAX_ITEMS_PER_REPORT: u32 = 10;
 /// Helper to insert an item into a Top-N list (bounded).
 /// The list is maintained in sorted order based on the provided comparator.
 pub fn insert_top_n<T, F>(
-    env: &Env,
+    _env: &Env,
     top_list: &mut soroban_sdk::Vec<T>,
     max_items: u32,
     item: T,
