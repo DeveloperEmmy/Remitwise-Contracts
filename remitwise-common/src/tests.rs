@@ -1423,23 +1423,25 @@ proptest! {
     }
 }
 
+// ---------------------------------------------------------------------------
+// require_no_pending_dispute_epoch tests
+// ---------------------------------------------------------------------------
 #[test]
-fn test_require_non_zero_bytes() {
+fn test_require_no_pending_dispute_epoch_rejects_outdated() {
     let env = Env::default();
+    env.mock_all_auths();
+    // Simulate setting the current pending dispute epoch to 5
+    env.storage().instance().set(&symbol_short!("DISP_EP"), &5u64);
+    
+    // Negative test: An outdated epoch (e.g. 3) must fail
+    let res = require_no_pending_dispute_epoch(&env, 3);
+    assert_eq!(res, Err(DisputeError::OutdatedEpoch));
+    
+    // Equal epoch (5) must pass
+    let res = require_no_pending_dispute_epoch(&env, 5);
+    assert_eq!(res, Ok(()));
 
-    // Valid cases
-    let valid_bytes = soroban_sdk::BytesN::from_array(&env, &[1; 32]);
-    assert_eq!(require_non_zero_bytes(&valid_bytes), Ok(()));
-
-    let mut mixed = [0; 32];
-    mixed[31] = 1;
-    let mixed_bytes = soroban_sdk::BytesN::from_array(&env, &mixed);
-    assert_eq!(require_non_zero_bytes(&mixed_bytes), Ok(()));
-
-    // Invalid case: all zeros
-    let zero_bytes = soroban_sdk::BytesN::from_array(&env, &[0; 32]);
-    assert_eq!(
-        require_non_zero_bytes(&zero_bytes),
-        Err(BytesNError::AllZeros)
-    );
+    // Future epoch (6) must pass
+    let res = require_no_pending_dispute_epoch(&env, 6);
+    assert_eq!(res, Ok(()));
 }
