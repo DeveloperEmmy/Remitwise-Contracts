@@ -1060,6 +1060,8 @@ impl ToI128Checked for i32 {
 /// All Remitwise contracts express percentages in basis points (1 bps = 0.01%)
 /// so that integer arithmetic can be used without floating point.
 pub const BASIS_POINTS: u32 = 10_000;
+pub const BPS_PER_PERCENT: u32 = 100;
+pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
 
 /// Basis points per one whole percentage point: 1 % = 100 bps.
 pub const BPS_PER_PERCENT: u32 = 100;
@@ -1208,7 +1210,9 @@ impl Rate {
         Self(bps)
     }
 
-    /// Create a `Rate` from a whole percentage integer value.
+    /// Construct a `Rate` from a whole percentage value.
+    ///
+    /// Returns `Ok(Rate)` if `percent * BPS_PER_PERCENT` fits in `u32`, or `Err(RateError::Overflow)` otherwise.
     pub fn from_percent(percent: u32) -> Result<Self, RateError> {
         percent
             .checked_mul(BPS_PER_PERCENT)
@@ -1216,6 +1220,13 @@ impl Rate {
             .ok_or(RateError::Overflow)
     }
 
+    /// Construct a `Rate` from a `Percent` type.
+    ///
+    /// Returns `Ok(Rate)` if the conversion succeeds, or `Err(RateError::Overflow)` otherwise.
+    #[inline(always)]
+    pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
+        percent.to_rate()
+    }
 
     /// Construct a `Rate` from an externally supplied raw value plus unit.
     ///
@@ -1439,6 +1450,69 @@ pub enum TagError {
     TooLong,
     /// A byte at `position` is not in the allowed charset after upper-case folding.
     InvalidChar { position: u32 },
+}
+
+/// Canonicalizes a single label string into a `Symbol`.
+///
+/// Rules:
+/// - Leading and trailing ASCII whitespace is stripped.
+/// - ASCII uppercase letters are folded to lowercase.
+/// - The result must satisfy `Symbol`'s charset (`[a-zA-Z0-9_]` after folding)
+///   and length (`1..=32` bytes after trimming), otherwise this panics.
+///
+/// # Idempotency guarantee
+///
+/// Applying this function twice to any input yields the same `Symbol`:
+/// `canonicalise_symbol(env, &canonicalise_symbol(env, &x).to_string()) == canonicalise_symbol(env, &x)`.
+///
+/// # Whitespace round-trip
+///
+/// Inputs that differ only in leading/trailing whitespace produce identical
+/// canonical `Symbol` values: `"hello"`, `" hello"`, and `"hello "` all map
+/// to `Symbol("hello")`.
+///
+/// # Panics
+///
+/// - On empty or whitespace-only input (after trimming length is 0).
+/// - On input over 32 bytes (after trimming).
+/// - When the trimmed, lowercased content contains bytes outside `[a-z0-9_]`.
+pub fn canonicalise_symbol(env: &Env, input: &soroban_sdk::String) -> Symbol {
+    let len = input.len();
+    if len == 0 {
+        panic!("symbol input must contain between 1 and 32 characters after trimming");
+    }
+    let mut buf = [0u8; 256];
+    if len as usize > buf.len() {
+        panic!("symbol input is too long");
+    }
+    input.copy_into_slice(&mut buf[..len as usize]);
+
+    let s = core::str::from_utf8(&buf[..len as usize])
+        .unwrap_or_else(|_| panic!("symbol input is not valid UTF-8"));
+
+    let trimmed = s.trim();
+    let trimmed_len = trimmed.len();
+    if trimmed_len == 0 {
+        panic!("symbol input must contain at least one non-whitespace character");
+    }
+    if trimmed_len > 32 {
+        panic!("symbol input must contain between 1 and 32 characters after trimming");
+    }
+
+    let trimmed_bytes = trimmed.as_bytes();
+    let mut canonical = [0u8; 32];
+    for (i, &byte) in trimmed_bytes.iter().enumerate() {
+        canonical[i] = if byte.is_ascii_uppercase() {
+            byte.to_ascii_lowercase()
+        } else {
+            byte
+        };
+    }
+
+    let canonical_str = core::str::from_utf8(&canonical[..trimmed_len])
+        .unwrap_or_else(|_| panic!("canonicalised symbol is not valid UTF-8"));
+
+    Symbol::new(env, canonical_str)
 }
 
 /// Signature verification failure.
@@ -1865,6 +1939,33 @@ fn symbol_matches_known_case_insensitive(env: &Env, symbol: &Symbol, known: &str
     false
 }
 
+/// Error returned when a read config schema version is outdated.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum MigrationError {
+    OutdatedVersion = 1,
+}
+
+/// Verify that a read config schema version is not outdated.
+///
+/// This is a defence-in-depth ingress check to reject reads against outdated config
+/// schema versions.
+///
+/// # Arguments
+/// * `v` - The version of the read config schema.
+///
+/// # Returns
+/// * `Ok(())` if the version is up to date (greater than or equal to `CONTRACT_VERSION`)
+/// * `Err(MigrationError::OutdatedVersion)` if the version is outdated
+pub fn verify_config_migration(v: u32) -> Result<(), MigrationError> {
+    if v < CONTRACT_VERSION {
+        Err(MigrationError::OutdatedVersion)
+    } else {
+        Ok(())
+    }
+}
+
 /// Event emission helper
 pub struct RemitwiseEvents;
 
@@ -1909,7 +2010,6 @@ impl RemitwiseEvents {
 
         #[cfg(test)]
         {
-            use soroban_sdk::xdr::ToXdr;
             use soroban_sdk::TryFromVal;
             let val: soroban_sdk::Val = data.into_val(env);
             if let Ok(sc_val) = soroban_sdk::xdr::ScVal::try_from_val(env, &val) {

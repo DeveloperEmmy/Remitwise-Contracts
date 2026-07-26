@@ -1,3 +1,4 @@
+#![allow(unused_imports, dead_code)]
 // remitwise-common tests
 
 /// Tests for [`canonicalize_tags`], [`canonicalize_tags_checked`], and [`clamp_limit`].
@@ -20,6 +21,8 @@ use crate::distribute_pro_rata;
 use ed25519_dalek::Signer;
 use proptest::prelude::*;
 use soroban_sdk::{Bytes, Env, IntoVal, String, Symbol, Vec};
+use soroban_sdk::testutils::{Ledger, LedgerInfo};
+use std::string::ToString;
 
 fn set_ledger(env: &Env, sequence_number: u32) {
     let proto = env.ledger().protocol_version();
@@ -1071,7 +1074,7 @@ proptest! {
         total in 0i128..=i128::MAX / 1_000_000, // Avoid overflow in intermediate products
         weights in proptest::collection::vec(1u32..=1000u32, 1..=10),
     ) {
-        let total_weight: u32 = weights.iter().map(|&w| w as u32).sum();
+        let total_weight: u32 = weights.iter().copied().sum();
         if total_weight == 0 {
             return Ok(()); // Skip invalid input
         }
@@ -1089,7 +1092,7 @@ proptest! {
 
         // Property 3: Last bucket receives at least its floor share (absorbs remainder)
         let last_idx = weights.len() - 1;
-        let last_floor = (total as i128)
+        let last_floor = total
             .saturating_mul(weights[last_idx] as i128)
             .saturating_div(total_weight as i128);
         prop_assert!(
@@ -1285,21 +1288,21 @@ fn test_canonicalize_tags_checked_does_not_panic_on_injected_special_chars() {
 fn test_require_active_pause_channel_uninitialized() {
     let env = Env::default();
     // Map doesn't exist yet, should not panic
-    crate::require_active_pause_channel(&env, soroban_sdk::Symbol::short("PAYMENTS"));
+    crate::require_active_pause_channel(&env, symbol_short!("PAYMENTS"));
 }
 
 #[test]
 fn test_require_active_pause_channel_active() {
     let env = Env::default();
     let mut map = soroban_sdk::Map::<soroban_sdk::Symbol, bool>::new(&env);
-    map.set(soroban_sdk::Symbol::short("PAYMENTS"), false);
+    map.set(symbol_short!("PAYMENTS"), false);
     env.storage().instance().set(
         &soroban_sdk::Symbol::new(&env, crate::STORAGE_PAUSE_CHANNELS),
         &map,
     );
 
     // Channel is active (false), should not panic
-    crate::require_active_pause_channel(&env, soroban_sdk::Symbol::short("PAYMENTS"));
+    crate::require_active_pause_channel(&env, symbol_short!("PAYMENTS"));
 }
 
 #[test]
@@ -1307,14 +1310,14 @@ fn test_require_active_pause_channel_active() {
 fn test_require_active_pause_channel_paused() {
     let env = Env::default();
     let mut map = soroban_sdk::Map::<soroban_sdk::Symbol, bool>::new(&env);
-    map.set(soroban_sdk::Symbol::short("PAYMENTS"), true);
+    map.set(symbol_short!("PAYMENTS"), true);
     env.storage().instance().set(
         &soroban_sdk::Symbol::new(&env, crate::STORAGE_PAUSE_CHANNELS),
         &map,
     );
 
     // Channel is paused (true), should panic
-    crate::require_active_pause_channel(&env, soroban_sdk::Symbol::short("PAYMENTS"));
+    crate::require_active_pause_channel(&env, symbol_short!("PAYMENTS"));
 }
 
 // ============================================================================
@@ -1393,6 +1396,22 @@ fn test_percent_type_conversions() {
     let p_overflow = Percent::from_percentage(u32::MAX);
     assert_eq!(p_overflow.to_rate(), Err(RateError::Overflow));
     assert_eq!(p_overflow.to_bps(), Err(RateError::Overflow));
+}
+
+#[test]
+fn test_verify_config_migration() {
+    use super::{verify_config_migration, MigrationError, CONTRACT_VERSION};
+    // Current version and newer versions must pass
+    assert_eq!(verify_config_migration(CONTRACT_VERSION), Ok(()));
+    assert_eq!(verify_config_migration(CONTRACT_VERSION + 1), Ok(()));
+
+    // Older versions must return an error (negative test)
+    if CONTRACT_VERSION > 0 {
+        assert_eq!(
+            verify_config_migration(CONTRACT_VERSION - 1),
+            Err(MigrationError::OutdatedVersion)
+        );
+    }
 }
 
 proptest! {

@@ -1,6 +1,8 @@
 #![allow(clippy::all)]
 #[cfg(test)]
 mod tests {
+    extern crate std;
+    use std::format;
     use crate::*;
     extern crate alloc;
     use remitwise_common::CoverageType;

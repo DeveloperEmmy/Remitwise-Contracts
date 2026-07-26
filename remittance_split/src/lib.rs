@@ -95,14 +95,8 @@ pub enum RemittanceSplitError {
     /// This is a defence-in-depth rejection for rebase/deflationary or otherwise
     /// incompatible token contracts that would undermine the remittance invariants.
     UnsupportedTokenContract = 31,
-    /// The corridor list exceeds the maximum allowed count.
-    CorridorCountExceeded = 32,
-    /// A corridor's fee exceeds the maximum allowed basis points.
-    CorridorFeeTooHigh = 33,
-    /// A corridor's max_amount is less than min_amount.
-    InvalidCorridorAmountRange = 34,
-    /// The corridor list contains duplicate corridor IDs.
-    DuplicateCorridorId = 35,
+    /// No active treasury has accepted a treasury proposal yet.
+    TreasuryNotConfigured = 32,
 }
 
 #[derive(Clone)]
@@ -716,6 +710,26 @@ impl RemittanceSplit {
     /// Get the active protocol treasury address, if one has been accepted.
     pub fn get_treasury_public(env: Env) -> Option<Address> {
         Self::get_treasury(&env)
+    }
+
+    /// Return the active treasury's balance of the split's configured USDC asset.
+    ///
+    /// This is a read-only audit view. The token is taken from the immutable
+    /// `SplitConfig`, so callers cannot substitute an arbitrary asset.
+    ///
+    /// # Errors
+    /// - `NotInitialized` if the split has not been initialized.
+    /// - `TreasuryNotConfigured` if no proposed treasury has accepted the role.
+    pub fn treasury_balance(env: Env) -> Result<i128, RemittanceSplitError> {
+        let config: SplitConfig = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("CONFIG"))
+            .ok_or(RemittanceSplitError::NotInitialized)?;
+        let treasury = Self::get_treasury(&env)
+            .ok_or(RemittanceSplitError::TreasuryNotConfigured)?;
+
+        Ok(TokenClient::new(&env, &config.usdc_contract).balance(&treasury))
     }
 
     /// Get the currently proposed (pending) treasury address, if any.
