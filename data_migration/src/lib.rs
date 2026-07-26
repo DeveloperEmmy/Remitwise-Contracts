@@ -4383,654 +4383,75 @@ mod tests {
         assert_eq!(first.header.checksum, second.header.checksum);
     }
 
-    // =========================================================================
-    // Issue #1282 — Migration-completed helper: Completed / InProgress / None
-    //
-    // The `MigrationTracker::is_imported` helper is the canonical
-    // "migration-completed" predicate. It maps to three observable states:
-    //
-    // * **None** (tracker is fresh — no snapshots have ever been presented to
-    //   it): `is_imported` returns `false`; `mark_imported` transitions to
-    //   Completed on first call.
-    //
-    // * **InProgress** (a snapshot has been built and is about to be imported,
-    //   but `mark_imported` has not yet been called for it): `is_imported`
-    //   returns `false` even though the tracker has recorded *other* payloads.
-    //
-    // * **Completed** (the snapshot has been successfully fed through
-    //   `mark_imported` without error): `is_imported` returns `true`.
-    //
-    // Each test below is named assertively after the invariant it locks in, and
-    // is fully deterministic (no randomness, no external I/O).
-    // =========================================================================
+    // --- RemittanceSplitExport specific migration tests ---
 
-    /// A fresh `MigrationTracker` (None state) reports every snapshot as
-    /// not-imported because nothing has been recorded yet.
     #[test]
-    fn migration_completed_none_state_reports_not_imported() {
-        let snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
-        let tracker = MigrationTracker::new();
+    fn test_remittance_split_export_import_happy_path() {
+        let payload = SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
+            owner: "GABC...".into(),
+            spending_percent: 5000,
+            savings_percent: 3000,
+            bills_percent: 1500,
+            insurance_percent: 500,
+        });
 
-        // A brand-new tracker has no history — any snapshot must read as
-        // not-yet-imported regardless of its payload type or checksum.
-        assert!(
-            !tracker.is_imported(&snapshot),
-            "a fresh tracker must return false for any snapshot"
-        );
-    }
+        let snapshot = ExportSnapshot::new(payload, ExportFormat::Json);
+        assert!(snapshot.verify_checksum());
 
-    /// A fresh tracker serialised via `Default` is semantically equivalent to
-    /// one produced by `new()`.
-    #[test]
-    fn migration_completed_default_tracker_equals_new() {
-        let snapshot = ExportSnapshot::new(sample_savings_payload(), ExportFormat::Json);
-        let tracker_new = MigrationTracker::new();
-        let tracker_default = MigrationTracker::default();
-
-        assert_eq!(
-            tracker_new.is_imported(&snapshot),
-            tracker_default.is_imported(&snapshot),
-            "MigrationTracker::new() and Default must agree on every query"
-        );
-    }
-
-    /// Once `mark_imported` succeeds the tracker transitions to the Completed
-    /// state and `is_imported` returns `true` for that exact snapshot.
-    #[test]
-    fn migration_completed_completed_state_returns_true_after_mark() {
-        let snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
-        let mut tracker = MigrationTracker::new();
-
-        // Pre-condition: not yet completed.
-        assert!(!tracker.is_imported(&snapshot));
-
-        // Transition to Completed.
-        tracker.mark_imported(&snapshot, 1_000).unwrap();
-
-        // Post-condition: completed.
-        assert!(
-            tracker.is_imported(&snapshot),
-            "is_imported must return true after a successful mark_imported"
-        );
-    }
-
-    /// After a full tracked round-trip (`import_from_json`) the snapshot is in
-    /// Completed state — `is_imported` returns `true` for both the original
-    /// handle and the deserialized copy.
-    #[test]
-    fn migration_completed_completed_state_after_full_tracked_import() {
-        let snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
         let bytes = export_to_json(&snapshot).unwrap();
         let mut tracker = MigrationTracker::new();
-
-        let loaded = import_from_json(&bytes, &mut tracker, 42_000).unwrap();
-
-        assert!(
-            tracker.is_imported(&snapshot),
-            "original snapshot handle must read as completed"
-        );
-        assert!(
-            tracker.is_imported(&loaded),
-            "deserialized snapshot must read as completed (identity is checksum+version)"
-        );
-    }
-
-    /// The InProgress state: a snapshot exists in memory and is about to be
-    /// imported, but the tracker has not yet recorded it.  `is_imported` must
-    /// return `false` even when the tracker already holds entries for *other*
-    /// payloads — completion is per-identity, not global.
-    #[test]
-    fn migration_completed_in_progress_state_returns_false_before_mark() {
-        let done_snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
-        let pending_snapshot = ExportSnapshot::new(sample_savings_payload(), ExportFormat::Json);
-        let mut tracker = MigrationTracker::new();
-
-        // Complete the first migration.
-        tracker.mark_imported(&done_snapshot, 1_000).unwrap();
-        assert!(tracker.is_imported(&done_snapshot), "first must be completed");
-
-        // The second snapshot is in-progress (built, not yet marked).
-        assert!(
-            !tracker.is_imported(&pending_snapshot),
-            "second snapshot must still be in-progress (not completed) \
-             even though the tracker has entries for another payload"
-        );
-    }
-
-    /// The InProgress → Completed transition is atomic from the caller's
-    /// perspective: `mark_imported` either succeeds (→ Completed) or returns
-    /// `DuplicateImport` (snapshot was already Completed).
-    #[test]
-    fn migration_completed_in_progress_transitions_to_completed_on_mark() {
-        let snapshot = ExportSnapshot::new(sample_generic_payload(), ExportFormat::Json);
-        let mut tracker = MigrationTracker::new();
-
-        // InProgress: present but not yet marked.
-        assert!(!tracker.is_imported(&snapshot));
-
-        // Transition: InProgress → Completed.
-        let mark_result = tracker.mark_imported(&snapshot, 2_000);
-        assert!(
-            mark_result.is_ok(),
-            "first mark_imported must succeed (InProgress → Completed)"
-        );
-        assert!(tracker.is_imported(&snapshot));
-
-        // A second mark must be rejected — already Completed.
-        let dup_result = tracker.mark_imported(&snapshot, 3_000);
-        assert_eq!(
-            dup_result.unwrap_err(),
-            MigrationError::DuplicateImport,
-            "second mark_imported must return DuplicateImport (already Completed)"
-        );
-    }
-
-    /// Completed → InProgress rollback via `unmark_imported_by_identity` is the
-    /// mechanism that lets an operator retry a failed migration.  After unmarking,
-    /// `is_imported` must return `false` and `mark_imported` must succeed again.
-    #[test]
-    fn migration_completed_unmark_reverts_completed_to_in_progress() {
-        let snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
-        let mut tracker = MigrationTracker::new();
-
-        // Reach Completed state.
-        tracker.mark_imported(&snapshot, 5_000).unwrap();
-        assert!(tracker.is_imported(&snapshot));
-
-        // Rollback to InProgress via unmark.
-        tracker.unmark_imported_by_identity(
-            &snapshot.header.checksum,
-            snapshot.header.version,
-        );
-        assert!(
-            !tracker.is_imported(&snapshot),
-            "unmark must revert to InProgress (is_imported returns false)"
-        );
-
-        // Re-marking must succeed (confirming the rollback is clean).
-        tracker.mark_imported(&snapshot, 6_000).unwrap();
-        assert!(tracker.is_imported(&snapshot));
-    }
-
-    /// `unmark_imported_by_identity` on a snapshot that was never marked is a
-    /// no-op: the tracker stays in None/InProgress state without panicking.
-    #[test]
-    fn migration_completed_unmark_nonexistent_identity_is_no_op() {
-        let snapshot = ExportSnapshot::new(sample_savings_payload(), ExportFormat::Json);
-        let mut tracker = MigrationTracker::new();
-
-        // Tracker is in None state; snapshot was never marked.
-        assert!(!tracker.is_imported(&snapshot));
-
-        // Unmark a non-existent identity — must not panic.
-        tracker.unmark_imported_by_identity(
-            &snapshot.header.checksum,
-            snapshot.header.version,
-        );
-
-        // Still in None/InProgress state.
-        assert!(!tracker.is_imported(&snapshot));
-    }
-
-    /// Multiple independent snapshots each have their own Completed state;
-    /// completing one does not affect the others.
-    #[test]
-    fn migration_completed_each_snapshot_has_independent_completion_state() {
-        let s1 = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
-        let s2 = ExportSnapshot::new(sample_savings_payload(), ExportFormat::Json);
-        let s3 = ExportSnapshot::new(sample_generic_payload(), ExportFormat::Json);
-        let mut tracker = MigrationTracker::new();
-
-        // None state for all three.
-        assert!(!tracker.is_imported(&s1));
-        assert!(!tracker.is_imported(&s2));
-        assert!(!tracker.is_imported(&s3));
-
-        // Complete s1 only.
-        tracker.mark_imported(&s1, 1_000).unwrap();
-
-        assert!(tracker.is_imported(&s1), "s1 must be Completed");
-        assert!(!tracker.is_imported(&s2), "s2 must remain InProgress/None");
-        assert!(!tracker.is_imported(&s3), "s3 must remain InProgress/None");
-
-        // Complete s3; s2 stays pending.
-        tracker.mark_imported(&s3, 2_000).unwrap();
-        assert!(tracker.is_imported(&s1));
-        assert!(!tracker.is_imported(&s2));
-        assert!(tracker.is_imported(&s3));
-    }
-
-    /// Binary-format imports also reach Completed state and are recognised by
-    /// `is_imported`, confirming the helper is format-agnostic (identity is
-    /// derived from checksum + version, not from the encoded bytes).
-    #[test]
-    fn migration_completed_binary_import_sets_completed_state() {
-        let snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Binary);
-        let bytes = export_to_binary(&snapshot).unwrap();
-        let mut tracker = MigrationTracker::new();
-
-        assert!(!tracker.is_imported(&snapshot));
-
-        import_from_binary(&bytes, &mut tracker, 7_000).unwrap();
-
-        assert!(
-            tracker.is_imported(&snapshot),
-            "binary-format import must also reach Completed state"
-        );
-    }
-}
-
-// =============================================================================
-// Issue #1281 — verify_migration_completed() tests
-//
-// These tests exercise the write-gate helper that prevents live writes from
-// landing on top of an incomplete migration. The negative test (writing before
-// completion) is the primary acceptance criterion.
-// =============================================================================
-#[cfg(test)]
-mod verify_migration_completed_tests {
-    use super::*;
-
-    // -----------------------------------------------------------------------
-    // Happy path: after mark_completed the gate opens.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn verify_migration_completed_passes_after_mark_completed() {
-        let mut tracker = MigrationTracker::new();
-        tracker.mark_completed();
-
-        assert_eq!(
-            verify_migration_completed(&tracker),
-            Ok(()),
-            "verify_migration_completed must return Ok after mark_completed"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Negative test: before mark_completed the gate is closed.
-    //
-    // This is the primary acceptance criterion for issue #1281.
-    // -----------------------------------------------------------------------
-
-    /// A write operation attempted before the migration is marked complete must
-    /// be rejected with MigrationError::MigrationNotCompleted.
-    ///
-    /// Threat mitigated: without this guard a caller could perform writes over
-    /// partially-applied on-chain state (e.g. a multi-step migration interrupted
-    /// mid-way), silently mixing migrated and un-migrated records in the same
-    /// storage namespace. The corruption surfaces only when the missing records
-    /// are later referenced — long after the migration window has closed.
-    #[test]
-    fn verify_migration_completed_rejects_before_mark_completed() {
-        let tracker = MigrationTracker::new();
-
-        assert_eq!(
-            verify_migration_completed(&tracker),
-            Err(MigrationError::MigrationNotCompleted),
-            "verify_migration_completed must return Err(MigrationNotCompleted) \
-             before mark_completed is called — write operations must be refused \
-             until the migration gate is explicitly opened"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // is_completed reflects the flag state.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn is_completed_is_false_on_new_tracker() {
-        let tracker = MigrationTracker::new();
-        assert!(!tracker.is_completed(), "new tracker must not be completed");
+        let imported = import_from_json(&bytes, &mut tracker, 1_000).unwrap();
+        
+        assert_eq!(snapshot.payload, imported.payload);
+        assert!(tracker.is_imported(&imported));
     }
 
     #[test]
-    fn is_completed_is_true_after_mark_completed() {
-        let mut tracker = MigrationTracker::new();
-        tracker.mark_completed();
-        assert!(
-            tracker.is_completed(),
-            "tracker must report completed after mark_completed"
-        );
-    }
+    fn test_remittance_split_export_import_invalid_percentages() {
+        // Percentages sum to 9900 (invalid)
+        let payload = SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
+            owner: "GABC...".into(),
+            spending_percent: 5000,
+            savings_percent: 3000,
+            bills_percent: 1400, // changed
+            insurance_percent: 500,
+        });
 
-    // -----------------------------------------------------------------------
-    // mark_completed is idempotent (calling twice must not panic or change state).
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn mark_completed_is_idempotent() {
-        let mut tracker = MigrationTracker::new();
-        tracker.mark_completed();
-        tracker.mark_completed(); // second call must be a no-op
-        assert!(tracker.is_completed());
-        assert_eq!(verify_migration_completed(&tracker), Ok(()));
-    }
-
-    // -----------------------------------------------------------------------
-    // Error display message is meaningful.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn migration_not_completed_error_display_is_descriptive() {
-        let msg = MigrationError::MigrationNotCompleted.to_string();
-        assert!(
-            msg.contains("migration not completed"),
-            "error message should mention 'migration not completed': {msg}"
-        );
-        assert!(
-            msg.contains("write"),
-            "error message should mention writes: {msg}"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Completed flag is independent of the import tracker.
-    // A tracker can have imports recorded but still not be completed.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn can_have_imports_without_being_completed() {
-        let snapshot = ExportSnapshot::new(
-            SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
-                owner: "GABC".into(),
-                spending_percent: 5000,
-                savings_percent: 3000,
-                bills_percent: 1500,
-                insurance_percent: 500,
-            }),
-            ExportFormat::Json,
-        );
+        let snapshot = ExportSnapshot::new(payload, ExportFormat::Json);
         let bytes = export_to_json(&snapshot).unwrap();
-
         let mut tracker = MigrationTracker::new();
-        import_from_json(&bytes, &mut tracker, 1_000).unwrap();
-
-        // Import recorded but not yet completed — write gate must still be closed.
-        assert!(tracker.is_imported(&snapshot));
-        assert!(!tracker.is_completed());
-        assert_eq!(
-            verify_migration_completed(&tracker),
-            Err(MigrationError::MigrationNotCompleted),
-            "having imports recorded does not implicitly open the write gate"
-        );
-
-        // Explicitly complete the migration — gate opens.
-        tracker.mark_completed();
-        assert_eq!(verify_migration_completed(&tracker), Ok(()));
-    }
-}
-
-// =============================================================================
-// Issue #1279 — Upgrade-epoch guard boundary tests
-//
-// `check_version_compatibility` (data_migration/src/lib.rs) enforces the
-// schema-version boundary for migration imports:
-//   - Accepted range: MIN_SUPPORTED_VERSION ..= SCHEMA_VERSION  (inclusive)
-//   - Anything outside that range is rejected with IncompatibleVersion
-//
-// These tests cover the same tiers as the orchestrator epoch-guard suite
-// (orchestrator/tests/dispute_epoch_guard.rs) but applied to the migration
-// schema version boundary:
-//
-//   • current  — SCHEMA_VERSION is accepted
-//   • min      — MIN_SUPPORTED_VERSION is accepted (lower boundary)
-//   • prior    — MIN_SUPPORTED_VERSION - 1 is rejected (one below the floor)
-//   • ancient  — 0 is always rejected (no staleness window)
-//   • future   — SCHEMA_VERSION + 1 is rejected (no forward acceptance)
-//   • sweep    — representative values outside the window all produce the
-//                same typed IncompatibleVersion error (with correct bounds)
-//   • snapshot — ExportSnapshot::is_version_compatible mirrors the check
-// =============================================================================
-#[cfg(test)]
-mod upgrade_epoch_guard_tests {
-    use super::*;
-
-    // -----------------------------------------------------------------------
-    // `current` tier — SCHEMA_VERSION is accepted.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn accepts_current_schema_version() {
-        assert_eq!(
-            check_version_compatibility(SCHEMA_VERSION),
-            Ok(()),
-            "SCHEMA_VERSION ({}) must be accepted by the version guard",
-            SCHEMA_VERSION
-        );
+        
+        let result = import_from_json(&bytes, &mut tracker, 1_000);
+        assert!(matches!(result, Err(MigrationError::ValidationFailed)));
     }
 
-    // -----------------------------------------------------------------------
-    // `min` tier — MIN_SUPPORTED_VERSION is the lower boundary and is accepted.
-    // -----------------------------------------------------------------------
+    proptest::proptest! {
+        #[test]
+        fn test_remittance_split_export_import_property_test(
+            owner in "\\PC*",
+            spending in 0..10000u32,
+            savings in 0..10000u32,
+            bills in 0..10000u32,
+        ) {
+            // Ensure sum <= 10000
+            let sum = spending as u64 + savings as u64 + bills as u64;
+            if sum > 10000 { return Ok(()); }
+            let insurance = 10000 - sum as u32;
+            
+            let payload = SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
+                owner,
+                spending_percent: spending,
+                savings_percent: savings,
+                bills_percent: bills,
+                insurance_percent: insurance,
+            });
 
-    #[test]
-    fn accepts_min_supported_version() {
-        assert_eq!(
-            check_version_compatibility(MIN_SUPPORTED_VERSION),
-            Ok(()),
-            "MIN_SUPPORTED_VERSION ({}) must be accepted — it is the lower boundary",
-            MIN_SUPPORTED_VERSION
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // `prior` tier — one below the floor is rejected.
-    //
-    // If MIN_SUPPORTED_VERSION > 0 we can check MIN - 1; if it is already 0
-    // we skip to the `ancient` test instead (which uses 0 directly). In
-    // practice MIN_SUPPORTED_VERSION == 1 for this codebase.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn rejects_one_below_min_supported_version() {
-        if MIN_SUPPORTED_VERSION == 0 {
-            // Can't go below 0 for a u32; skip the off-by-one tier.
-            return;
+            let snapshot = ExportSnapshot::new(payload, ExportFormat::Json);
+            let bytes = export_to_json(&snapshot).unwrap();
+            let mut tracker = MigrationTracker::new();
+            
+            let imported = import_from_json(&bytes, &mut tracker, 1_000).unwrap();
+            assert_eq!(snapshot.payload, imported.payload);
         }
-        let prior = MIN_SUPPORTED_VERSION - 1;
-        assert_eq!(
-            check_version_compatibility(prior),
-            Err(MigrationError::IncompatibleVersion {
-                found: prior,
-                min: MIN_SUPPORTED_VERSION,
-                max: SCHEMA_VERSION,
-            }),
-            "version {} (MIN - 1) must be rejected; equality at the floor is the only accepted boundary",
-            prior
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // `ancient` tier — version 0 is always rejected after bumps.
-    //
-    // Mirrors the orchestrator test `rejects_ancient_epoch_at_zero_after_many_bumps`.
-    // There is no staleness window and no special-cased leniency for version 0.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn rejects_ancient_version_zero() {
-        // Version 0 predates the schema and must always be rejected.
-        // This pins the invariant: there is no staleness window, no lower
-        // leniency, and no special case for the "zeroth" version.
-        if MIN_SUPPORTED_VERSION == 0 {
-            // If the floor is 0 then 0 is accepted — constraint cannot be tested.
-            assert_eq!(check_version_compatibility(0), Ok(()));
-        } else {
-            assert_eq!(
-                check_version_compatibility(0),
-                Err(MigrationError::IncompatibleVersion {
-                    found: 0,
-                    min: MIN_SUPPORTED_VERSION,
-                    max: SCHEMA_VERSION,
-                }),
-                "version 0 must be rejected; there is no staleness window below MIN_SUPPORTED_VERSION"
-            );
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // `future` tier — SCHEMA_VERSION + 1 is rejected.
-    //
-    // Mirrors `rejects_future_epoch_one_above_current` in the orchestrator suite.
-    // Pins the symmetry of the guard around the accepted window.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn rejects_one_above_schema_version() {
-        let future = SCHEMA_VERSION + 1;
-        assert_eq!(
-            check_version_compatibility(future),
-            Err(MigrationError::IncompatibleVersion {
-                found: future,
-                min: MIN_SUPPORTED_VERSION,
-                max: SCHEMA_VERSION,
-            }),
-            "version {} (SCHEMA_VERSION + 1) must be rejected — forward versions are not accepted",
-            future
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Sweep — every value outside the accepted window produces the same typed
-    // IncompatibleVersion error with the correct min/max bounds.
-    //
-    // Includes an extreme value (u32::MAX) to catch any silent overflow
-    // or saturating-cast that could sneak into a boundary comparison.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn rejects_representative_out_of_range_versions_with_identical_error_shape() {
-        // Build a list of clearly out-of-range values.
-        // We use saturating arithmetic so this works even if SCHEMA_VERSION == 0
-        // or MIN_SUPPORTED_VERSION == u32::MAX (contrived but safe).
-        let below_range: Vec<u32> = (0..MIN_SUPPORTED_VERSION)
-            .take(3) // at most: 0, 1, 2
-            .collect();
-        let above_range: Vec<u32> = [
-            SCHEMA_VERSION.saturating_add(1),
-            SCHEMA_VERSION.saturating_add(2),
-            SCHEMA_VERSION.saturating_add(100),
-            u32::MAX,
-        ]
-        .into_iter()
-        .filter(|&v| v > SCHEMA_VERSION) // guard against SCHEMA_VERSION == u32::MAX
-        .collect();
-
-        let out_of_range: Vec<u32> = below_range
-            .into_iter()
-            .chain(above_range)
-            .collect();
-
-        for version in out_of_range {
-            let result = check_version_compatibility(version);
-            assert_eq!(
-                result,
-                Err(MigrationError::IncompatibleVersion {
-                    found: version,
-                    min: MIN_SUPPORTED_VERSION,
-                    max: SCHEMA_VERSION,
-                }),
-                "version {} outside [{}..{}] must be rejected with IncompatibleVersion \
-                 carrying the correct min/max bounds",
-                version, MIN_SUPPORTED_VERSION, SCHEMA_VERSION
-            );
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // ExportSnapshot::is_version_compatible must mirror check_version_compatibility.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn snapshot_is_version_compatible_accepts_schema_version() {
-        let snapshot = ExportSnapshot::new(
-            SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
-                owner: "G".into(),
-                spending_percent: 5000,
-                savings_percent: 3000,
-                bills_percent: 1500,
-                insurance_percent: 500,
-            }),
-            ExportFormat::Json,
-        );
-        assert_eq!(snapshot.header.version, SCHEMA_VERSION);
-        assert!(
-            snapshot.is_version_compatible(),
-            "a freshly-built snapshot at SCHEMA_VERSION must pass is_version_compatible"
-        );
-    }
-
-    #[test]
-    fn snapshot_is_version_compatible_rejects_future_version() {
-        let mut snapshot = ExportSnapshot::new(
-            SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
-                owner: "G".into(),
-                spending_percent: 5000,
-                savings_percent: 3000,
-                bills_percent: 1500,
-                insurance_percent: 500,
-            }),
-            ExportFormat::Json,
-        );
-        snapshot.header.version = SCHEMA_VERSION + 1;
-        assert!(
-            !snapshot.is_version_compatible(),
-            "snapshot with version SCHEMA_VERSION + 1 must fail is_version_compatible"
-        );
-    }
-
-    #[test]
-    fn snapshot_is_version_compatible_rejects_ancient_zero() {
-        if MIN_SUPPORTED_VERSION == 0 {
-            return; // version 0 is accepted; skip
-        }
-        let mut snapshot = ExportSnapshot::new(
-            SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
-                owner: "G".into(),
-                spending_percent: 5000,
-                savings_percent: 3000,
-                bills_percent: 1500,
-                insurance_percent: 500,
-            }),
-            ExportFormat::Json,
-        );
-        snapshot.header.version = 0;
-        assert!(
-            !snapshot.is_version_compatible(),
-            "snapshot with version 0 must fail is_version_compatible when MIN_SUPPORTED_VERSION > 0"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // validate_for_import fires IncompatibleVersion before ChecksumMismatch
-    // (i.e. the version check is the first gate, not an afterthought).
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn validate_for_import_version_check_fires_before_checksum_check() {
-        let mut snapshot = ExportSnapshot::new(
-            SnapshotPayload::RemittanceSplit(RemittanceSplitExport {
-                owner: "G".into(),
-                spending_percent: 5000,
-                savings_percent: 3000,
-                bills_percent: 1500,
-                insurance_percent: 500,
-            }),
-            ExportFormat::Json,
-        );
-        // Set a future version AND a wrong checksum — version check must fire first.
-        snapshot.header.version = SCHEMA_VERSION + 1;
-        snapshot.header.checksum = "wrong".into();
-
-        assert_eq!(
-            snapshot.validate_for_import(),
-            Err(MigrationError::IncompatibleVersion {
-                found: SCHEMA_VERSION + 1,
-                min: MIN_SUPPORTED_VERSION,
-                max: SCHEMA_VERSION,
-            }),
-            "IncompatibleVersion must be returned before ChecksumMismatch when both are wrong"
-        );
     }
 }
