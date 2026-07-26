@@ -220,48 +220,6 @@ pub enum BytesReturnError {
     ReturnTooLarge = 1,
 }
 
-/// Error returned when a dispute-related operation is attempted in an outdated epoch.
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum DisputeError {
-    /// The epoch is outdated and cannot be used for dispute ops.
-    OutdatedEpoch = 1,
-}
-
-
-/// Maximum allowed byte length for a short (inline) Symbol.
-///
-/// # Panics
-/// - Panics if `from >= to`.
-pub fn verify_ordered_pair(from: u64, to: u64) {
-    if from >= to {
-        panic!("Invalid range: from ({from}) must be strictly less than to ({to})");
-    }
-}
-
-/// Verifies that the provided signature matches the admin's public key for the given message.
-///
-/// # Arguments
-/// - `env` - Soroban environment
-/// - `admin_pk` - Admin's Ed25519 public key
-/// - `message` - The message that was signed
-/// - `signature` - The Ed25519 signature
-///
-/// # Errors
-/// - `RemitwiseError::InvalidSignature` if the signature verification fails
-pub fn require_signed_by_admin(
-    env: &soroban_sdk::Env,
-    admin_pk: soroban_sdk::crypto::ed25519::PublicKey,
-    message: soroban_sdk::Bytes,
-    signature: soroban_sdk::crypto::ed25519::Signature,
-) -> Result<(), RemitwiseError> {
-    env.crypto()
-        .ed25519_verify(admin_pk, message, signature)
-        .map_err(|_| RemitwiseError::InvalidSignature)?;
-    Ok(())
-}
-
 /// Verifies that the provided signature matches the admin's public key for the given message.
 ///
 /// # Arguments
@@ -977,118 +935,6 @@ pub fn clamp_limit(limit: u32) -> u32 {
         MAX_PAGE_LIMIT
     } else {
         limit
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Top-N bound validation
-// ---------------------------------------------------------------------------
-
-/// Error returned when a caller-supplied top-N count exceeds the hard cap.
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum TopNError {
-    /// `n > max`.  Every top-N endpoint must enforce a hard limit on the
-    /// number of items requested so that an attacker cannot force unbounded
-    /// in-memory allocation or gas exhaustion.
-    TopNTooLarge = 1,
-}
-
-/// Reject a user-supplied top-N count when it exceeds the configurable cap.
-///
-/// This is a defence-in-depth guard that must be called before allocating a
-/// sorted result buffer of size `n`.  Unlike [`clamp_limit`], which silently
-/// caps the value, this function returns a typed error so the caller can
-/// surface a clear contract error.
-///
-/// # Threat model
-///
-/// An attacker who supplies an arbitrarily large `n` (e.g. `u32::MAX`) to a
-/// top-N endpoint can force the contract to:
-///
-/// - Allocate an in-memory vector of size `n` (allocator pressure; in WASM
-///   this may trigger a host budget overflow and abort the transaction).
-/// - Execute O(n×m) sorted-insertion logic where m is the number of source
-///   items, dramatically increasing the instruction count and consuming the
-///   caller's instruction budget while wasting the validator's compute.
-/// - Emit events or produce return values whose size scales with `n`,
-///   potentially exceeding XDR limits or indexer budgets downstream.
-///
-/// The check is a single `u32` comparison.  It is safe to call even on
-/// hot paths because it cannot panic and adds no storage I/O.
-///
-/// # Arguments
-/// * `n`   - The caller-supplied top-N count.
-/// * `max` - The configurable maximum (typically [`MAX_TOP_N`]).
-///
-/// # Returns
-/// * `Ok(())` when `n <= max`.
-/// * `Err(TopNError::TopNTooLarge)` when `n > max`.
-///
-/// # Cost
-/// A single `u32` comparison; negligible relative to any top-N entry
-/// point's existing storage reads, cross-contract calls, and sorting logic.
-#[inline(always)]
-pub fn require_bounded_top_n(n: u32, max: u32) -> Result<(), TopNError> {
-    if n > max {
-        Err(TopNError::TopNTooLarge)
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod bounded_top_n_tests {
-    use super::*;
-
-    #[test]
-    fn n_within_limit_passes() {
-        assert_eq!(require_bounded_top_n(5, 10), Ok(()));
-    }
-
-    #[test]
-    fn n_at_max_passes() {
-        assert_eq!(require_bounded_top_n(10, 10), Ok(()));
-    }
-
-    #[test]
-    fn n_is_zero_passes() {
-        assert_eq!(require_bounded_top_n(0, 10), Ok(()));
-    }
-
-    #[test]
-    fn n_exceeds_max_by_one_fails() {
-        assert_eq!(
-            require_bounded_top_n(11, 10),
-            Err(TopNError::TopNTooLarge)
-        );
-    }
-
-    #[test]
-    fn n_is_u32_max_fails() {
-        assert_eq!(
-            require_bounded_top_n(u32::MAX, 10),
-            Err(TopNError::TopNTooLarge)
-        );
-    }
-
-    #[test]
-    fn max_is_zero_n_is_one_fails() {
-        assert_eq!(
-            require_bounded_top_n(1, 0),
-            Err(TopNError::TopNTooLarge)
-        );
-    }
-
-    #[test]
-    fn max_is_zero_n_is_zero_passes() {
-        assert_eq!(require_bounded_top_n(0, 0), Ok(()));
-    }
-
-    #[test]
-    fn max_is_u32_max_n_is_u32_max_passes() {
-        assert_eq!(require_bounded_top_n(u32::MAX, u32::MAX), Ok(()));
     }
 }
 
@@ -2177,33 +2023,6 @@ fn symbol_matches_known_case_insensitive(env: &Env, symbol: &Symbol, known: &str
         }
     }
     false
-}
-
-/// Error returned when a read config schema version is outdated.
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum MigrationError {
-    OutdatedVersion = 1,
-}
-
-/// Verify that a read config schema version is not outdated.
-///
-/// This is a defence-in-depth ingress check to reject reads against outdated config
-/// schema versions.
-///
-/// # Arguments
-/// * `v` - The version of the read config schema.
-///
-/// # Returns
-/// * `Ok(())` if the version is up to date (greater than or equal to `CONTRACT_VERSION`)
-/// * `Err(MigrationError::OutdatedVersion)` if the version is outdated
-pub fn verify_config_migration(v: u32) -> Result<(), MigrationError> {
-    if v < CONTRACT_VERSION {
-        Err(MigrationError::OutdatedVersion)
-    } else {
-        Ok(())
-    }
 }
 
 /// Event emission helper
