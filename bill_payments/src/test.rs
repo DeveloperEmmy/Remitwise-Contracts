@@ -1355,7 +1355,7 @@ mod testsuit {
         create_n_bills(&client, &env, &alice, 3);
         create_n_bills(&client, &env, &bob, 3);
 
-        let page = client.get_all_bills_page(&admin, &0, &5);
+        let page = client.get_all_bills_page(&admin, &0, &10);
         assert_eq!(
             page.items.len(),
             6,
@@ -3403,13 +3403,16 @@ mod testsuit {
 
         assert_eq!(
             emitted_actions,
-            [symbol_short!("paused"), symbol_short!("unpaused")]
+            [
+                Symbol::new(&env, "paused_v2"),
+                Symbol::new(&env, "unpaused_v2"),
+            ]
         );
     }
 
     #[test]
     fn test_unpause_before_schedule_does_not_emit_unpause_event() {
-        use soroban_sdk::symbol_short;
+        use soroban_sdk::{symbol_short, Symbol};
         use soroban_sdk::testutils::Events as _;
 
         let env = Env::default();
@@ -3433,7 +3436,7 @@ mod testsuit {
         let topics = events.last().unwrap().1;
         let action: soroban_sdk::Symbol =
             soroban_sdk::FromVal::from_val(&env, &topics.get(3).unwrap());
-        assert_eq!(action, symbol_short!("paused"));
+        assert_eq!(action, Symbol::new(&env, "paused_v2"));
     }
 
     #[test]

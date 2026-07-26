@@ -110,7 +110,9 @@ pub fn insert_top_n<T, F>(
     item: T,
     mut cmp: F,
 ) where
-    T: Clone + soroban_sdk::IntoVal<Env, soroban_sdk::Val> + soroban_sdk::TryFromVal<Env, soroban_sdk::Val>,
+    T: Clone
+        + soroban_sdk::IntoVal<Env, soroban_sdk::Val>
+        + soroban_sdk::TryFromVal<Env, soroban_sdk::Val>,
     F: FnMut(&T, &T) -> core::cmp::Ordering,
 {
     let mut inserted = false;
@@ -1375,17 +1377,7 @@ pub enum StableCurrencyError {
 /// This is a defence-in-depth allowlist of well-known stablecoins.
 /// Rebase/deflationary/elastic-supply tokens (e.g., AMPL, OHM, TIME) are intentionally excluded.
 const STABLE_CURRENCIES: &[&str] = &[
-    "USDC",
-    "USDT",
-    "USDP",
-    "BUSD",
-    "GUSD",
-    "TUSD",
-    "USDD",
-    "EURC",
-    "EURS",
-    "DAI",
-    "XLM",
+    "USDC", "USDT", "USDP", "BUSD", "GUSD", "TUSD", "USDD", "EURC", "EURS", "DAI", "XLM",
 ];
 
 /// Validates that a currency symbol represents a supported stable asset.
