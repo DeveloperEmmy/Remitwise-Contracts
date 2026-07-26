@@ -2122,11 +2122,11 @@ mod tests {
     fn test_encrypted_payload_unsupported_future_version_rejected() {
         let plain = b"test payload";
         let b64 = base64::engine::general_purpose::STANDARD.encode(plain);
-        let encoded = format!("enc:v2:{}", b64);
+        let encoded = format!("enc:v3:{}", b64);
         let result = import_from_encrypted_payload(&encoded);
         assert!(matches!(
             result,
-            Err(MigrationError::UnsupportedEncryptedVersion { found: 2, max: 1 })
+            Err(MigrationError::UnsupportedEncryptedVersion { found: 3, max: 2 })
         ));
     }
 
@@ -2138,7 +2138,7 @@ mod tests {
         let result = import_from_encrypted_payload(&encoded);
         assert!(matches!(
             result,
-            Err(MigrationError::UnsupportedEncryptedVersion { found: 999, max: 1 })
+            Err(MigrationError::UnsupportedEncryptedVersion { found: 999, max: 2 })
         ));
     }
 
@@ -2150,7 +2150,7 @@ mod tests {
         let result = import_from_encrypted_payload(&encoded);
         assert!(matches!(
             result,
-            Err(MigrationError::UnsupportedEncryptedVersion { found: 0, max: 1 })
+            Err(MigrationError::UnsupportedEncryptedVersion { found: 0, max: 2 })
         ));
     }
 

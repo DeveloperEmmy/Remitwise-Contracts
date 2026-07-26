@@ -312,6 +312,36 @@ pub fn guard_bytes_len(bytes: &Bytes) -> Result<(), BytesReturnError> {
 }
 
 // ---------------------------------------------------------------------------
+// BytesN validation
+// ---------------------------------------------------------------------------
+
+/// Error returned when a `BytesN` value is completely zeroed.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum BytesNError {
+    /// The `BytesN` array consists entirely of zero bytes.
+    AllZeros = 1,
+}
+
+/// Guards that a `BytesN` array is not completely zeroed.
+///
+/// This is a defence-in-depth check. Cryptographic identifiers like public keys
+/// or signatures should never legitimately be all-zeros. If they are, it usually
+/// points to a zero-initialised buffer bug or an attacker intentionally passing
+/// `[0; N]` to exploit uninitialized or default state in a verifier.
+///
+/// # Errors
+/// Returns [`BytesNError::AllZeros`] when `bytes` consists entirely of zero bytes.
+pub fn require_non_zero_bytes<const N: usize>(bytes: &BytesN<N>) -> Result<(), BytesNError> {
+    if bytes.to_array().iter().all(|&b| b == 0) {
+        Err(BytesNError::AllZeros)
+    } else {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Settlement amount validation
 // ---------------------------------------------------------------------------
 
@@ -1151,6 +1181,11 @@ pub const BPS_PER_PERCENT: u32 = 100;
 /// Alias for [`BPS_PER_PERCENT`] — kept for backwards compatibility.
 pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
 
+/// Number of basis points in one whole percent (1% = 100 bps).
+pub const BPS_PER_PERCENT: u32 = 100;
+
+/// Alias for `BPS_PER_PERCENT`.
+pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
 /// Supported units for externally supplied rate inputs.
 ///
 /// Remitwise contracts currently accept only basis points. Treating a raw rate
@@ -1292,30 +1327,20 @@ impl Rate {
         Self(bps)
     }
 
-    /// Construct a `Rate` from a whole percentage integer value.
-    ///
-    /// `percent = 5` → `Rate(500)` (5%).
-    ///
-    /// # Errors
-    /// Returns [`RateError::Overflow`] when `percent * 100` would exceed `u32::MAX`.
+    /// Create a `Rate` from a whole percentage integer.
+    /// Returns `Err(RateError::Overflow)` if `percent * BPS_PER_PERCENT` exceeds `u32::MAX`.
     #[inline(always)]
     pub fn from_percent(percent: u32) -> Result<Self, RateError> {
         percent
             .checked_mul(BPS_PER_PERCENT)
-            .map(Self)
+            .map(Self::from_bps)
             .ok_or(RateError::Overflow)
     }
 
-    /// Construct a `Rate` from a [`Percent`] newtype value.
-    ///
-    /// Equivalent to `percent.to_rate()` — provided here as a symmetric
-    /// constructor on `Rate` so callers can write `Rate::from_percent_type(p)`.
-    ///
-    /// # Errors
-    /// Returns [`RateError::Overflow`] when `percent * 100` would exceed `u32::MAX`.
+    /// Create a `Rate` from a strongly-typed [`Percent`].
     #[inline(always)]
     pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
-        percent.to_rate()
+        Self::from_percent(percent.to_percentage())
     }
 
     /// Construct a `Rate` from an externally supplied raw value plus unit.

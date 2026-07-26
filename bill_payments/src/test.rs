@@ -3474,8 +3474,8 @@ mod testsuit {
         assert_eq!(
             emitted_actions,
             [
-                Symbol::new(&env, "paused_v2"),
-                Symbol::new(&env, "unpaused_v2"),
+                symbol_short!("paused_v2"),
+                soroban_sdk::Symbol::new(&env, "unpaused_v2")
             ]
         );
     }
@@ -3506,7 +3506,7 @@ mod testsuit {
         let topics = events.last().unwrap().1;
         let action: soroban_sdk::Symbol =
             soroban_sdk::FromVal::from_val(&env, &topics.get(3).unwrap());
-        assert_eq!(action, Symbol::new(&env, "paused_v2"));
+        assert_eq!(action, symbol_short!("paused_v2"));
     }
 
     #[test]
