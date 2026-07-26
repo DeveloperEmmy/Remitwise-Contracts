@@ -1167,25 +1167,12 @@ pub const BASIS_POINTS: u32 = 10_000;
 pub const BPS_PER_PERCENT: u32 = 100;
 pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
 
-/// Number of basis points in one percentage point (1% = 100 bps).
-pub const BPS_PER_PERCENT: u32 = 100;
-pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
-
-/// Conversion factor from whole percentage points to basis points.
-///
-/// `1% = 100 bps`, so multiplying a whole-percent value by this constant
-/// converts it to basis points. Named `BPS_PER_PERCENT` for clarity at
-/// call sites: "how many BPS are in one percent?".
-pub const BPS_PER_PERCENT: u32 = 100;
-
-/// Alias for [`BPS_PER_PERCENT`] — kept for backwards compatibility.
-pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
-
-/// Number of basis points in one whole percent (1% = 100 bps).
-pub const BPS_PER_PERCENT: u32 = 100;
-
-/// Alias for `BPS_PER_PERCENT`.
+/// Basis points per whole percentage point (1% = 100 bps).
 pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
+
+/// Alias for `BASIS_POINTS_PER_PERCENT` for brevity in arithmetic.
+pub const BPS_PER_PERCENT: u32 = BASIS_POINTS_PER_PERCENT;
+
 /// Supported units for externally supplied rate inputs.
 ///
 /// Remitwise contracts currently accept only basis points. Treating a raw rate
@@ -1376,17 +1363,9 @@ impl Rate {
         self.0
     }
 
-    /// Create a `Rate` from a whole percentage integer.
+    /// Create a `Rate` from a whole percentage value.
     ///
-    /// Returns `Ok(Rate)` if `percent * BPS_PER_PERCENT` fits in `u32`,
-    /// or `Err(RateError::Overflow)` otherwise.
-    ///
-    /// # Examples
-    /// ```
-    /// use remitwise_common::Rate;
-    /// assert_eq!(Rate::from_percent(5), Ok(Rate::from_bps(500)));
-    /// assert_eq!(Rate::from_percent(0), Ok(Rate::from_bps(0)));
-    /// ```
+    /// Returns `Ok(Rate)` if `percent * 100` fits in `u32`, or `Err(RateError::Overflow)` otherwise.
     #[inline(always)]
     pub fn from_percent(percent: u32) -> Result<Self, RateError> {
         percent
@@ -2012,6 +1991,33 @@ pub fn require_stable_currency(env: &Env, symbol: &Symbol) -> Result<(), StableC
         }
     }
     Err(StableCurrencyError::UnsupportedCurrency)
+}
+
+/// Alias for [`require_stable_currency`] with a name that clearly signals
+/// its purpose as an inbound-token ingress guard.
+///
+/// Use this at entry points that receive tokens from external callers
+/// (e.g., deposit, payment, remittance entry points) to reject rebase,
+/// deflationary, or elastic-supply tokens that could silently alter balances
+/// during transfer and violate contract invariants.
+///
+/// # Threat model
+/// Without this guard, an attacker could deposit a rebase/deflationary token
+/// (e.g., AMPL, OHM, TIME) that changes balance on transfer. The contract
+/// would record the nominal amount but the actual value received could differ,
+/// breaking settlement invariants (remittance splits, bill payments, insurance
+/// payouts, savings goals).
+///
+/// # Arguments
+/// * `env` - The Soroban environment
+/// * `symbol` - The currency symbol to validate (case-insensitive, whitespace trimmed)
+///
+/// # Returns
+/// * `Ok(())` if the symbol is a recognized stable currency
+/// * `Err(StableCurrencyError::UnsupportedCurrency)` if the symbol is not recognized
+#[inline(always)]
+pub fn require_supported_currency(env: &Env, symbol: &Symbol) -> Result<(), StableCurrencyError> {
+    require_stable_currency(env, symbol)
 }
 
 /// Compare a Symbol case-insensitively against a known ASCII currency string.
@@ -2828,6 +2834,33 @@ mod stable_currency_tests {
         let sym = Symbol::new(&env, "");
         assert_eq!(
             require_stable_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    #[test]
+    fn require_supported_currency_accepts_usdc() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "USDC");
+        assert_eq!(super::require_supported_currency(&env, &sym), Ok(()));
+    }
+
+    #[test]
+    fn require_supported_currency_rejects_rebase_token() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "AMPL");
+        assert_eq!(
+            super::require_supported_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    #[test]
+    fn require_supported_currency_rejects_unknown_token() {
+        let env = Env::default();
+        let sym = Symbol::new(&env, "RANDOM");
+        assert_eq!(
+            super::require_supported_currency(&env, &sym),
             Err(StableCurrencyError::UnsupportedCurrency)
         );
     }
