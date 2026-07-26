@@ -1322,6 +1322,22 @@ fn test_percent_type_conversions() {
     assert_eq!(p_overflow.to_bps(), Err(RateError::Overflow));
 }
 
+#[test]
+fn test_verify_config_migration() {
+    use super::{verify_config_migration, MigrationError, CONTRACT_VERSION};
+    // Current version and newer versions must pass
+    assert_eq!(verify_config_migration(CONTRACT_VERSION), Ok(()));
+    assert_eq!(verify_config_migration(CONTRACT_VERSION + 1), Ok(()));
+
+    // Older versions must return an error (negative test)
+    if CONTRACT_VERSION > 0 {
+        assert_eq!(
+            verify_config_migration(CONTRACT_VERSION - 1),
+            Err(MigrationError::OutdatedVersion)
+        );
+    }
+}
+
 proptest! {
     #[test]
     fn proptest_percent_rate_roundtrip(pct in 0u32..=(u32::MAX / 100)) {

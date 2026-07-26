@@ -785,6 +785,8 @@ impl ToI128Checked for i32 {
 /// All Remitwise contracts express percentages in basis points (1 bps = 0.01%)
 /// so that integer arithmetic can be used without floating point.
 pub const BASIS_POINTS: u32 = 10_000;
+pub const BPS_PER_PERCENT: u32 = 100;
+pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
 
 /// Supported units for externally supplied rate inputs.
 ///
@@ -921,6 +923,24 @@ impl Rate {
     #[inline(always)]
     pub fn from_bps(bps: u32) -> Self {
         Self(bps)
+    }
+
+    /// Construct a `Rate` from a whole percentage value.
+    ///
+    /// Returns `Ok(Rate)` if `percent * BPS_PER_PERCENT` fits in `u32`, or `Err(RateError::Overflow)` otherwise.
+    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
+        percent
+            .checked_mul(BPS_PER_PERCENT)
+            .map(Self::from_bps)
+            .ok_or(RateError::Overflow)
+    }
+
+    /// Construct a `Rate` from a `Percent` type.
+    ///
+    /// Returns `Ok(Rate)` if the conversion succeeds, or `Err(RateError::Overflow)` otherwise.
+    #[inline(always)]
+    pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
+        percent.to_rate()
     }
 
     /// Construct a `Rate` from an externally supplied raw value plus unit.
@@ -1405,6 +1425,33 @@ fn symbol_matches_known_case_insensitive(env: &Env, symbol: &Symbol, known: &str
         }
     }
     false
+}
+
+/// Error returned when a read config schema version is outdated.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum MigrationError {
+    OutdatedVersion = 1,
+}
+
+/// Verify that a read config schema version is not outdated.
+///
+/// This is a defence-in-depth ingress check to reject reads against outdated config
+/// schema versions.
+///
+/// # Arguments
+/// * `v` - The version of the read config schema.
+///
+/// # Returns
+/// * `Ok(())` if the version is up to date (greater than or equal to `CONTRACT_VERSION`)
+/// * `Err(MigrationError::OutdatedVersion)` if the version is outdated
+pub fn verify_config_migration(v: u32) -> Result<(), MigrationError> {
+    if v < CONTRACT_VERSION {
+        Err(MigrationError::OutdatedVersion)
+    } else {
+        Ok(())
+    }
 }
 
 /// Event emission helper
