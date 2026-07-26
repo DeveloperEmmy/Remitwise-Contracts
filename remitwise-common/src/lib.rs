@@ -128,6 +128,13 @@ pub struct RoleRevokedEvent {
 pub const DEFAULT_PAGE_LIMIT: u32 = 20;
 pub const MAX_PAGE_LIMIT: u32 = 50;
 
+/// Hard cap for top-N report items.
+///
+/// All top-N endpoints across the workspace share this limit. Any
+/// user-supplied N greater than this value must be rejected via
+/// [`require_bounded_top_n`] rather than silently clamped.
+pub const MAX_TOP_N: u32 = 10;
+
 /// Standardized TTL Constants (Ledger Counts)
 pub const DAY_IN_LEDGERS: u32 = 17280; // ~5 seconds per ledger
 
@@ -827,6 +834,118 @@ pub fn clamp_limit(limit: u32) -> u32 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Top-N bound validation
+// ---------------------------------------------------------------------------
+
+/// Error returned when a caller-supplied top-N count exceeds the hard cap.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum TopNError {
+    /// `n > max`.  Every top-N endpoint must enforce a hard limit on the
+    /// number of items requested so that an attacker cannot force unbounded
+    /// in-memory allocation or gas exhaustion.
+    TopNTooLarge = 1,
+}
+
+/// Reject a user-supplied top-N count when it exceeds the configurable cap.
+///
+/// This is a defence-in-depth guard that must be called before allocating a
+/// sorted result buffer of size `n`.  Unlike [`clamp_limit`], which silently
+/// caps the value, this function returns a typed error so the caller can
+/// surface a clear contract error.
+///
+/// # Threat model
+///
+/// An attacker who supplies an arbitrarily large `n` (e.g. `u32::MAX`) to a
+/// top-N endpoint can force the contract to:
+///
+/// - Allocate an in-memory vector of size `n` (allocator pressure; in WASM
+///   this may trigger a host budget overflow and abort the transaction).
+/// - Execute O(n×m) sorted-insertion logic where m is the number of source
+///   items, dramatically increasing the instruction count and consuming the
+///   caller's instruction budget while wasting the validator's compute.
+/// - Emit events or produce return values whose size scales with `n`,
+///   potentially exceeding XDR limits or indexer budgets downstream.
+///
+/// The check is a single `u32` comparison.  It is safe to call even on
+/// hot paths because it cannot panic and adds no storage I/O.
+///
+/// # Arguments
+/// * `n`   - The caller-supplied top-N count.
+/// * `max` - The configurable maximum (typically [`MAX_TOP_N`]).
+///
+/// # Returns
+/// * `Ok(())` when `n <= max`.
+/// * `Err(TopNError::TopNTooLarge)` when `n > max`.
+///
+/// # Cost
+/// A single `u32` comparison; negligible relative to any top-N entry
+/// point's existing storage reads, cross-contract calls, and sorting logic.
+#[inline(always)]
+pub fn require_bounded_top_n(n: u32, max: u32) -> Result<(), TopNError> {
+    if n > max {
+        Err(TopNError::TopNTooLarge)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod bounded_top_n_tests {
+    use super::*;
+
+    #[test]
+    fn n_within_limit_passes() {
+        assert_eq!(require_bounded_top_n(5, 10), Ok(()));
+    }
+
+    #[test]
+    fn n_at_max_passes() {
+        assert_eq!(require_bounded_top_n(10, 10), Ok(()));
+    }
+
+    #[test]
+    fn n_is_zero_passes() {
+        assert_eq!(require_bounded_top_n(0, 10), Ok(()));
+    }
+
+    #[test]
+    fn n_exceeds_max_by_one_fails() {
+        assert_eq!(
+            require_bounded_top_n(11, 10),
+            Err(TopNError::TopNTooLarge)
+        );
+    }
+
+    #[test]
+    fn n_is_u32_max_fails() {
+        assert_eq!(
+            require_bounded_top_n(u32::MAX, 10),
+            Err(TopNError::TopNTooLarge)
+        );
+    }
+
+    #[test]
+    fn max_is_zero_n_is_one_fails() {
+        assert_eq!(
+            require_bounded_top_n(1, 0),
+            Err(TopNError::TopNTooLarge)
+        );
+    }
+
+    #[test]
+    fn max_is_zero_n_is_zero_passes() {
+        assert_eq!(require_bounded_top_n(0, 0), Ok(()));
+    }
+
+    #[test]
+    fn max_is_u32_max_n_is_u32_max_passes() {
+        assert_eq!(require_bounded_top_n(u32::MAX, u32::MAX), Ok(()));
+    }
+}
+
 /// Pro-rata distribution helper
 ///
 /// Maximum safe weight for a single pro-rata bucket.
@@ -1131,6 +1250,25 @@ impl Rate {
         self.0
     }
 
+    /// Create a `Rate` from a whole percentage integer.
+    ///
+    /// Returns `Ok(Rate)` if `percent * BPS_PER_PERCENT` fits in `u32`,
+    /// or `Err(RateError::Overflow)` otherwise.
+    ///
+    /// # Examples
+    /// ```
+    /// use remitwise_common::Rate;
+    /// assert_eq!(Rate::from_percent(5), Ok(Rate::from_bps(500)));
+    /// assert_eq!(Rate::from_percent(0), Ok(Rate::from_bps(0)));
+    /// ```
+    #[inline(always)]
+    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
+        percent
+            .checked_mul(BPS_PER_PERCENT)
+            .map(Self)
+            .ok_or(RateError::Overflow)
+    }
+
     /// Convert this rate back to a whole percentage integer value, truncating fractional basis points.
     #[inline(always)]
     pub fn to_percent(self) -> u32 {
@@ -1166,6 +1304,18 @@ impl ToI128Checked for Rate {
     fn to_i128_checked(self) -> Result<i128, IntConversionError> {
         Ok(self.0 as i128)
     }
+}
+
+/// Construct a [`Rate`] from a [`Percent`] value.
+///
+/// This is a convenience wrapper around [`Rate::from_percent`] for callers
+/// that already have a typed [`Percent`].
+///
+/// # Errors
+/// Returns [`RateError::Overflow`] when the conversion overflows `u32`.
+#[inline(always)]
+pub fn from_percent_type(percent: Percent) -> Result<Rate, RateError> {
+    Rate::from_percent(percent.to_percentage())
 }
 
 /// Error related to time and periods.
