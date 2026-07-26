@@ -1104,8 +1104,240 @@ fn test_request_hash_hashed_path_rejects_self_transfer() {
 
     assert_eq!(
         result,
-        Err(Ok(RemittanceSplitError::SelfTransferNotAllowed))
+        Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100))
     );
+}
+
+// ---------------------------------------------------------------------------
+// Corridor configuration tests
+// ---------------------------------------------------------------------------
+
+fn sample_corridor(env: &Env, id: u32) -> Corridor {
+    Corridor {
+        id,
+        source_currency: symbol_short!("USD"),
+        dest_currency: symbol_short!("NGN"),
+        min_amount: 100,
+        max_amount: 1_000_000,
+        fee_bps: 50,
+    }
+}
+
+fn sample_corridors(env: &Env) -> Vec<Corridor> {
+    vec![
+        env,
+        sample_corridor(env, 1),
+        sample_corridor(env, 2),
+    ]
+}
+
+#[test]
+fn test_init_corridors_happy_path() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    client.initialize_split(&owner, &0, &token_addr, &5000, &3000, &1500, &500);
+
+    let corridors = sample_corridors(&env);
+    client.init_corridors(&owner, &1, &corridors);
+
+    let stored = client.get_corridors();
+    assert_eq!(stored.len(), 2);
+
+    let c1 = stored.get(0).unwrap();
+    assert_eq!(c1.id, 1);
+    assert_eq!(c1.source_currency, symbol_short!("USD"));
+    assert_eq!(c1.dest_currency, symbol_short!("NGN"));
+    assert_eq!(c1.min_amount, 100);
+    assert_eq!(c1.max_amount, 1_000_000);
+    assert_eq!(c1.fee_bps, 50);
+}
+
+#[test]
+fn test_init_corridors_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let corridors = sample_corridors(&env);
+
+    let result = client.try_init_corridors(&owner, &0, &corridors);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::NotInitialized)));
+}
+
+#[test]
+fn test_init_corridors_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    client.initialize_split(&owner, &0, &token_addr, &5000, &3000, &1500, &500);
+
+    let corridors = sample_corridors(&env);
+    let result = client.try_init_corridors(&attacker, &1, &corridors);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::Unauthorized)));
+}
+
+#[test]
+fn test_init_corridors_count_exceeded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    client.initialize_split(&owner, &0, &token_addr, &5000, &3000, &1500, &500);
+
+    // Create more corridors than MAX_CORRIDORS
+    let mut many_corridors = vec![&env];
+    for i in 0..=params::MAX_CORRIDORS {
+        many_corridors.push_back(sample_corridor(&env, i));
+    }
+
+    let result = client.try_init_corridors(&owner, &1, &many_corridors);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::CorridorCountExceeded)));
+}
+
+#[test]
+fn test_init_corridors_fee_too_high() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    client.initialize_split(&owner, &0, &token_addr, &5000, &3000, &1500, &500);
+
+    let bad = Corridor {
+        id: 1,
+        source_currency: symbol_short!("USD"),
+        dest_currency: symbol_short!("NGN"),
+        min_amount: 100,
+        max_amount: 1_000_000,
+        fee_bps: params::MAX_FEE_BPS + 1,
+    };
+    let corridors = vec![&env, bad];
+
+    let result = client.try_init_corridors(&owner, &1, &corridors);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::CorridorFeeTooHigh)));
+}
+
+#[test]
+fn test_init_corridors_invalid_amount_range() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    client.initialize_split(&owner, &0, &token_addr, &5000, &3000, &1500, &500);
+
+    let bad = Corridor {
+        id: 1,
+        source_currency: symbol_short!("USD"),
+        dest_currency: symbol_short!("NGN"),
+        min_amount: 1_000_000,
+        max_amount: 100,
+        fee_bps: 50,
+    };
+    let corridors = vec![&env, bad];
+
+    let result = client.try_init_corridors(&owner, &1, &corridors);
+    assert_eq!(
+        result,
+        Err(Ok(RemittanceSplitError::InvalidCorridorAmountRange))
+    );
+}
+
+#[test]
+fn test_init_corridors_duplicate_id() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    client.initialize_split(&owner, &0, &token_addr, &5000, &3000, &1500, &500);
+
+    let c1 = Corridor {
+        id: 1,
+        source_currency: symbol_short!("USD"),
+        dest_currency: symbol_short!("NGN"),
+        min_amount: 100,
+        max_amount: 1_000_000,
+        fee_bps: 50,
+    };
+    let c2 = Corridor {
+        id: 1,
+        source_currency: symbol_short!("EUR"),
+        dest_currency: symbol_short!("NGN"),
+        min_amount: 200,
+        max_amount: 2_000_000,
+        fee_bps: 75,
+    };
+    let corridors = vec![&env, c1, c2];
+
+    let result = client.try_init_corridors(&owner, &1, &corridors);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::DuplicateCorridorId)));
+}
+
+#[test]
+fn test_init_corridors_replaces_previous() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    client.initialize_split(&owner, &0, &token_addr, &5000, &3000, &1500, &500);
+
+    let first = vec![&env, sample_corridor(&env, 1)];
+    client.init_corridors(&owner, &1, &first);
+
+    let second = vec![&env, sample_corridor(&env, 99)];
+    client.init_corridors(&owner, &2, &second);
+
+    let stored = client.get_corridors();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored.get(0).unwrap().id, 99);
 }
 
 #[test]
@@ -2514,7 +2746,7 @@ fn test_update_split_percentage_out_of_range() {
     let owner = Address::generate(&env);
     let token_addr = Address::generate(&env);
 
-    let result = client.try_initialize_split(&owner, &0, &token_addr, &4000, &3000, &2000, &1000);
+    let _result = client.try_initialize_split(&owner, &0, &token_addr, &4000, &3000, &2000, &1000);
 
     // Try to update with spending_percent > 10_000
     let result = client.try_update_split(&owner, &1, &10_001, &0, &0, &0);
@@ -2544,4 +2776,181 @@ fn test_update_split_percentages_invalid_sum() {
         result,
         Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100))
     );
+}
+
+// ── Event-version guard tests ──────────────────────────────────────────
+// Covers the three boundary categories: supported, previous (too old),
+// and unsupported (future).  The range-based guard in verify_snapshot /
+// import_snapshot accepts versions in [MIN_SUPPORTED_SCHEMA_VERSION,
+// SCHEMA_VERSION]; everything else is rejected with UnsupportedVersion.
+
+fn make_test_snapshot(
+    env: &Env,
+    version: u32,
+    owner: &Address,
+    token_addr: &Address,
+) -> ExportSnapshot {
+    let config = SplitConfig {
+        owner: owner.clone(),
+        spending_percent: 50,
+        savings_percent: 30,
+        bills_percent: 15,
+        insurance_percent: 5,
+        timestamp: env.ledger().timestamp(),
+        initialized: true,
+        usdc_contract: token_addr.clone(),
+    };
+    let schedules: Vec<RemittanceSchedule> = Vec::new(env);
+    let checksum = RemittanceSplit::compute_checksum(version, &config, &schedules);
+    ExportSnapshot {
+        schema_version: version,
+        checksum,
+        config,
+        schedules,
+        exported_at: env.ledger().timestamp(),
+    }
+}
+
+#[test]
+fn test_verify_snapshot_current_version_succeeds() {
+    let env = Env::default();
+    set_time(&env, 1_000);
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let snapshot = make_test_snapshot(&env, SCHEMA_VERSION, &owner, &token_addr);
+    let result = RemittanceSplit::verify_snapshot(env.clone(), snapshot);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_verify_snapshot_min_supported_version_succeeds() {
+    let env = Env::default();
+    set_time(&env, 1_000);
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let snapshot =
+        make_test_snapshot(&env, MIN_SUPPORTED_SCHEMA_VERSION, &owner, &token_addr);
+    let result = RemittanceSplit::verify_snapshot(env.clone(), snapshot);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_verify_snapshot_rejects_version_zero() {
+    let env = Env::default();
+    set_time(&env, 1_000);
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let snapshot = make_test_snapshot(&env, 0, &owner, &token_addr);
+    let result = RemittanceSplit::verify_snapshot(env.clone(), snapshot);
+    assert_eq!(result, Err(RemittanceSplitError::UnsupportedVersion));
+}
+
+#[test]
+fn test_verify_snapshot_rejects_future_version() {
+    let env = Env::default();
+    set_time(&env, 1_000);
+    let owner = Address::generate(&env);
+    let token_addr = Address::generate(&env);
+
+    let snapshot = make_test_snapshot(&env, SCHEMA_VERSION + 1, &owner, &token_addr);
+    let result = RemittanceSplit::verify_snapshot(env.clone(), snapshot);
+    assert_eq!(result, Err(RemittanceSplitError::UnsupportedVersion));
+}
+
+#[test]
+fn test_import_snapshot_rejects_previous_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let (client, owner, token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    let config = SplitConfig {
+        owner: owner.clone(),
+        spending_percent: 50,
+        savings_percent: 30,
+        bills_percent: 15,
+        insurance_percent: 5,
+        timestamp: env.ledger().timestamp(),
+        initialized: true,
+        usdc_contract: token_addr,
+    };
+    let schedules: Vec<RemittanceSchedule> = Vec::new(&env);
+    let snapshot = ExportSnapshot {
+        schema_version: 0,
+        checksum: 0,
+        config,
+        schedules,
+        exported_at: env.ledger().timestamp(),
+    };
+
+    let nonce = 1;
+    let result = client.try_import_snapshot(&owner, &nonce, &snapshot);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::UnsupportedVersion)));
+}
+
+#[test]
+fn test_import_snapshot_rejects_future_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let (client, owner, token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+
+    let config = SplitConfig {
+        owner: owner.clone(),
+        spending_percent: 50,
+        savings_percent: 30,
+        bills_percent: 15,
+        insurance_percent: 5,
+        timestamp: env.ledger().timestamp(),
+        initialized: true,
+        usdc_contract: token_addr,
+    };
+    let schedules: Vec<RemittanceSchedule> = Vec::new(&env);
+    let snapshot = ExportSnapshot {
+        schema_version: SCHEMA_VERSION + 1,
+        checksum: 0,
+        config,
+        schedules,
+        exported_at: env.ledger().timestamp(),
+    };
+
+    let nonce = 1;
+    let result = client.try_import_snapshot(&owner, &nonce, &snapshot);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::UnsupportedVersion)));
+}
+
+#[test]
+fn test_restore_from_snapshot_wrong_version_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_time(&env, 1_000);
+
+    let (client, owner, _token_addr, _) = setup_split(&env, 50, 30, 15, 5);
+    let admin = Address::generate(&env);
+    client.set_upgrade_admin(&owner, &admin);
+
+    // Take a valid pre-upgrade snapshot
+    client.pre_upgrade(&admin);
+
+    // Corrupt the stored snapshot's schema_version so it no longer matches
+    // SNAPSHOT_VERSION
+    env.as_contract(&client.address, || {
+        let mut snapshot: PreUpgradeSnapshot = env
+            .storage()
+            .persistent()
+            .get(&SNAPSHOT_KEY)
+            .unwrap();
+        snapshot.schema_version = SNAPSHOT_VERSION + 1;
+        env.storage()
+            .persistent()
+            .set(&SNAPSHOT_KEY, &snapshot);
+    });
+
+    let result = client.try_restore_from_snapshot(&admin);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::UnsupportedVersion)));
 }

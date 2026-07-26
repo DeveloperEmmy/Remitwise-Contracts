@@ -263,8 +263,8 @@ pub enum ReportingError {
     InvalidPercentageSplit = 8,
     /// u64 to u32 overflow guard
     Overflow = 9,
-    /// Top-N count exceeds the hard cap ([`MAX_ITEMS_PER_REPORT`]).
-    TopNTooLarge = 10,
+    /// Proposed new admin is the same as the current admin.
+    SameAdmin = 10,
 }
 
 #[contracttype]
@@ -692,6 +692,7 @@ impl ReportingContract {
     /// # Errors
     /// * `NotInitialized` - If contract has not been initialized
     /// * `Unauthorized` - If caller is not the current admin
+    /// * `SameAdmin` - If `new_admin` is the same as the current admin
     pub fn propose_new_admin(
         env: Env,
         caller: Address,
@@ -707,6 +708,10 @@ impl ReportingContract {
 
         if caller != admin {
             return Err(ReportingError::Unauthorized);
+        }
+
+        if new_admin == admin {
+            return Err(ReportingError::SameAdmin);
         }
 
         Self::extend_instance_ttl(&env);

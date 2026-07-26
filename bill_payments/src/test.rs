@@ -2515,74 +2515,48 @@ mod testsuit {
         );
     }
 
-    // Mix of past-due, exactly-due, and future bills: only past-due appears.
-    //     #[test]
-    //     fn test_time_drift_overdue_boundary_mixed_bills() {
-    //     let env = Env::default();
-    //     let contract_id = env.register_contract(None, BillPayments);
-    //     let client = BillPaymentsClient::new(&env, &contract_id);
-    //     let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
-    //     env.mock_all_auths();
+    }
 
-    //     // 1. Set time to a starting point
-    //     let start_time = 2_000_000u64;
-    //     env.ledger().set_ledger_timestamp(start_time);
+    // ══════════════════════════════════════════════════════════════════════
+    // Settlement Window Guard Tests
+    //
+    // A bill is overdue iff `!bill.paid && bill.due_date < current_time`
+    // (strict less-than).  The three boundary conditions are covered:
+    //   • Inside window  – due_date > now  →  NOT overdue
+    //   • Exact boundary  – due_date == now → NOT overdue
+    //   • Outside window  – due_date < now  →  IS overdue
+    // ══════════════════════════════════════════════════════════════════════
 
-    //     // 2. Create bills with relative due dates
-    //     // All these due dates are >= current_time (2,000,000), so validation passes.
+    /// Bill is NOT overdue when `due_date > current_time` (inside the settlement window).
+    #[test]
+    fn test_settlement_window_guard_bill_not_overdue_when_inside_window() {
+        let due_date = 3_000_000u64;
+        let env = Env::default();
+        set_ledger_time(&env, 1, 1_000_000);
 
-    //     // This will become overdue later
-    //     client.create_bill(
-    //         &owner,
-    //         &String::from_str(&env, "Overdue"),
-    //         &100,
-    //         &2000001, // T+1
-    //         &false,
-    //         &0,
-    //         &String::from_str(&env, "XLM"),
-    //     );
+        let contract_id = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &contract_id);
+        let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
 
-    //     // This will be exactly due later
-    //     client.create_bill(
-    //         &owner,
-    //         &String::from_str(&env, "DueNow"),
-    //         &200,
-    //         &2000005, // T+5
-    //         &false,
-    //         &0,
-    //         &String::from_str(&env, "XLM"),
-    //     );
+        env.mock_all_auths();
+        client.create_bill(
+            &owner,
+            &String::from_str(&env, "InsideWindow"),
+            &100,
+            &due_date,
+            &false,
+            &0,
+            &None,
+            &String::from_str(&env, "XLM"),
+            &None,
+        );
 
-    //     // This will stay in the future
-    //     client.create_bill(
-    //         &owner,
-    //         &String::from_str(&env, "Future"),
-    //         &300,
-    //         &2000010, // T+10
-    //         &false,
-    //         &0,
-    //         &String::from_str(&env, "XLM"),
-    //     );
-
-    //     // 3. WARP TIME forward to 2,000,005
-    //     // Now:
-    //     // - Bill 1 (2000001) is < 2000005 (OVERDUE)
-    //     // - Bill 2 (2000005) is == 2000005 (NOT OVERDUE)
-    //     // - Bill 3 (2000010) is > 2000005 (NOT OVERDUE)
-    //     env.ledger().set_ledger_timestamp(2000005);
-
-    //     let page = client.get_overdue_bills(&0, &100);
-
-    //     assert_eq!(
-    //         page.count, 1,
-    //         "Only the bill with due_date < current_time must appear overdue"
-    //     );
-    //     assert_eq!(
-    //         page.items.items.get(0).unwrap().amount,
-    //         100,
-    //         "Overdue bill must be the one with due_date < current_time"
-    //     );
-    // }
+        let page = client.get_overdue_bills(&0, &100);
+        assert_eq!(
+            page.count, 0,
+            "Bill with due_date > now must not appear overdue (inside window)"
+        );
+    }
 
     /// Full-day boundary: bill created at due_date, queried one day later, is overdue.
     #[test]
@@ -2620,6 +2594,102 @@ mod testsuit {
             page.count, 1,
             "Bill must be overdue one full day past due_date"
         );
+    }
+
+    /// Mixed boundary: only the bill with `due_date < now` is overdue;
+    /// the bill with `due_date == now` and the bill with `due_date > now`
+    /// are both NOT overdue.
+    #[test]
+    fn test_settlement_window_guard_mixed_boundaries() {
+        let start = 2_000_000u64;
+        let env = Env::default();
+        set_ledger_time(&env, 1, start);
+
+        let contract_id = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &contract_id);
+        let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
+
+        env.mock_all_auths();
+        // Bill 1: due_date = start + 1 → will be overdue when time reaches start + 5
+        client.create_bill(
+            &owner,
+            &String::from_str(&env, "Past"),
+            &100,
+            &(start + 1),
+            &false,
+            &0,
+            &None,
+            &String::from_str(&env, "XLM"),
+            &None,
+        );
+        // Bill 2: due_date = start + 5 → exact boundary, NOT overdue at start + 5
+        client.create_bill(
+            &owner,
+            &String::from_str(&env, "Exact"),
+            &200,
+            &(start + 5),
+            &false,
+            &0,
+            &None,
+            &String::from_str(&env, "XLM"),
+            &None,
+        );
+        // Bill 3: due_date = start + 10 → inside window, NOT overdue at start + 5
+        client.create_bill(
+            &owner,
+            &String::from_str(&env, "Future"),
+            &300,
+            &(start + 10),
+            &false,
+            &0,
+            &None,
+            &String::from_str(&env, "XLM"),
+            &None,
+        );
+
+        set_ledger_time(&env, 1, start + 5);
+        let page = client.get_overdue_bills(&0, &100);
+        assert_eq!(
+            page.count, 1,
+            "Only the bill with due_date < now must be overdue"
+        );
+        assert_eq!(
+            page.items.get(0).unwrap().amount,
+            100,
+            "Overdue bill must be the one with due_date < now"
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn prop_settlement_window_guard_inside_window_not_overdue(
+            due_date in 1_000_001u64..10_000_000u64,
+            now in 1_000_000u64..due_date
+        ) {
+            let env = Env::default();
+            set_ledger_time(&env, 1, now);
+            let contract_id = env.register_contract(None, BillPayments);
+            let client = BillPaymentsClient::new(&env, &contract_id);
+            let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
+            env.mock_all_auths();
+            client.create_bill(
+                &owner,
+                &String::from_str(&env, "Inside"),
+                &100,
+                &due_date,
+                &false,
+                &0,
+                &None,
+                &String::from_str(&env, "XLM"),
+                &None,
+            );
+            let page = client.get_overdue_bills(&0, &100);
+            assert_eq!(
+                page.count, 0,
+                "Bill with due_date ({}) > now ({}) must not be overdue",
+                due_date, now
+            );
+        }
     }
 
     // ---------------------------------------------------------------------------
