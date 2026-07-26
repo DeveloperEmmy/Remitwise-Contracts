@@ -1123,44 +1123,10 @@ impl ToI128Checked for i32 {
 /// All Remitwise contracts express percentages in basis points (1 bps = 0.01%)
 /// so that integer arithmetic can be used without floating point.
 pub const BASIS_POINTS: u32 = 10_000;
+/// Number of basis points in a single whole percent.
 pub const BPS_PER_PERCENT: u32 = 100;
-pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
-
-/// Basis points per whole percentage point (1% = 100 bps).
-pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
-
-/// Alias for `BASIS_POINTS_PER_PERCENT` for brevity in arithmetic.
-pub const BPS_PER_PERCENT: u32 = BASIS_POINTS_PER_PERCENT;
-
-/// Basis points per whole percentage point: 100 basis points = 1%.
-pub const BPS_PER_PERCENT: u32 = 100;
-
-/// Alias for BPS_PER_PERCENT for readability across crates.
+/// Alias for the number of basis points in a single whole percent.
 pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
-
-/// Basis-points per whole percentage (1 % = 100 bps).
-///
-/// Used by [`Percent`] and [`Rate`] conversions between whole-percent and
-/// basis-points representations. Centralised here so callers cannot drift
-/// on the conversion factor.
-pub const BPS_PER_PERCENT: u32 = 100;
-
-/// Alias for [`BPS_PER_PERCENT`] kept for naming compatibility with the
-/// historical percent-conversion module.
-pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
-
-/// Basis points per 1% percentage point: 100 basis points = 1%.
-pub const BPS_PER_PERCENT: u32 = 100;
-
-/// Alias for [`BPS_PER_PERCENT`]: 100 basis points = 1%.
-pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
-
-/// Basis points per percent (100 basis points = 1%)
-/// Used for converting whole percentages to basis points.
-pub const BPS_PER_PERCENT: u32 = 100;
-
-/// Alias for `BPS_PER_PERCENT` for clarity in some contexts.
-pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
 
 /// Supported units for externally supplied rate inputs.
 ///
@@ -1331,17 +1297,7 @@ impl Rate {
         Ok(Self::from_bps(value))
     }
 
-    /// Convert a whole percentage value to a [`Rate`] in basis points.
-    ///
-    /// Multiplies the input percentage by 100 to get basis points.
-    /// Returns `Err(RateError::Overflow)` if the multiplication overflows.
-    ///
-    /// # Examples
-    /// ```ignore
-    /// assert_eq!(Rate::from_percent(0), Ok(Rate::from_bps(0)));
-    /// assert_eq!(Rate::from_percent(5), Ok(Rate::from_bps(500)));
-    /// assert_eq!(Rate::from_percent(100), Ok(Rate::from_bps(10_000)));
-    /// ```
+    /// Construct a `Rate` from a whole percentage value.
     #[inline(always)]
     pub fn from_percent(percent: u32) -> Result<Self, RateError> {
         percent
@@ -1350,12 +1306,10 @@ impl Rate {
             .ok_or(RateError::Overflow)
     }
 
-    /// Convert a [`Percent`] type to a [`Rate`].
-    ///
-    /// This is a convenience wrapper around `Percent::to_rate()`.
+    /// Construct a `Rate` from a `Percent` wrapper.
     #[inline(always)]
     pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
-        percent.to_rate()
+        Self::from_percent(percent.to_percentage())
     }
 
     /// Return the raw basis-point value.
