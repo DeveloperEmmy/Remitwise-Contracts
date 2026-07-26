@@ -342,6 +342,7 @@ To run an example, use `cargo run --example <example_name>`:
 - [Type-Safe Percent Conversion](docs/type-safe-percent-conversion.md) - Converting whole percentages to basis points with checked overflow arithmetic
 - [Gas Unit Costs Reference](docs/GAS_UNIT_COSTS.md) - Per-instruction CPU/memory/ledger-I/O costs, network limits, and per-contract benchmark table
 - [Storage Layout Reference](STORAGE_LAYOUT.md)
+- [Reserved Storage Keys](docs/RESERVED_STORAGE_KEYS.md) - Storage keys reserved for roadmap features to prevent collisions (contributor guide)
 - [Contract Specs & Migrations](docs/MIGRATIONS.md) - How to bump a contract spec without breaking existing storage
 - [Event Indexer](indexer/README.md) - Off-chain event indexing and querying
 - [Audit Trail](docs/AUDIT_TRAIL.md) - How to reconstruct historical state from events alone
