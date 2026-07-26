@@ -218,6 +218,60 @@ fn test_clear_emergency_state_is_idempotent_when_active() {
 }
 
 #[test]
+fn clear_emergency_state_no_op_preserves_all_state_when_no_emergency() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, EmergencyKillswitch);
+    let client = EmergencyKillswitchClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let module_a = symbol_short!("bill");
+    let module_b = symbol_short!("savings");
+    let func_a = symbol_short!("pay");
+    let func_b = symbol_short!("refund");
+
+    // Establish some non-global state that must survive a no-op clear.
+    client.pause_module(&module_a);
+    client.pause_function(&module_a, &func_a);
+    client.pause_function(&module_a, &func_b);
+    client.pause_function(&module_b, &func_a);
+
+    // Confirm the global is not paused and there is no schedule.
+    assert!(!client.is_paused());
+    assert_eq!(client.get_unpause_schedule(), None);
+
+    // Snapshot expected state.
+    assert!(client.is_module_paused(&module_a));
+    assert!(!client.is_module_paused(&module_b));
+    assert!(client.is_function_paused(&module_a, &func_a));
+    assert!(client.is_function_paused(&module_a, &func_b));
+    assert!(client.is_function_paused(&module_b, &func_a));
+
+    // ── Act: call clear_emergency_state when no emergency is active ──────
+    client.clear_emergency_state();
+
+    // ── Assert: every piece of state is exactly as before ────────────────
+    assert!(!client.is_paused());
+    assert_eq!(client.get_unpause_schedule(), None);
+
+    // Module-level pauses must survive.
+    assert!(client.is_module_paused(&module_a));
+    assert!(!client.is_module_paused(&module_b));
+
+    // Function-level pauses must survive.
+    assert!(client.is_function_paused(&module_a, &func_a));
+    assert!(client.is_function_paused(&module_a, &func_b));
+    assert!(client.is_function_paused(&module_b, &func_a));
+
+    // Paused-function list integrity must hold.
+    let list_a = client.list_paused_functions(&module_a);
+    assert_eq!(list_a.len(), 2);
+    assert!(list_a.contains(func_a));
+    assert!(list_a.contains(func_b));
+}
+
+#[test]
 fn test_clear_emergency_state_requires_initialization() {
     let env = Env::default();
     env.mock_all_auths();
