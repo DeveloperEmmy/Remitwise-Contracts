@@ -1715,39 +1715,24 @@ impl ReportingContract {
             total_count += 1;
 
             // Sorted insertion for Top-N (bounded)
-            //
-            // Ordering contract (deterministic):
-            // 1) Primary: amount descending
-            // 2) Tie-break: bill id ascending
-            let mut inserted = false;
-            for i in 0..top_bills.len() {
-                if let Some(existing) = top_bills.get(i) {
-                    let should_insert = if bill.amount > existing.amount {
-                        true
-                    } else if bill.amount < existing.amount {
-                        false
-                    } else {
-                        // Equal amounts → deterministic tie-break by id ascending
-                        bill.id < existing.id
-                    };
-
-                    if should_insert {
-                        top_bills.insert(i, bill.clone());
-                        inserted = true;
-                        break;
+            remitwise_common::insert_top_n(
+                env,
+                &mut top_bills,
+                MAX_ITEMS_PER_REPORT,
+                bill,
+                |a, b| match a.amount.cmp(&b.amount) {
+                    core::cmp::Ordering::Equal => {
+                        // Deterministic tie-break by id ascending
+                        // Smaller ID should be Greater (appear earlier)
+                        b.id.cmp(&a.id)
                     }
-                } else {
-                    // defensive: if index is out of bounds, skip
-                    continue;
-                }
-            }
+                    other => other,
+                },
+            );
+        }
 
-            if !inserted && top_bills.len() < MAX_ITEMS_PER_REPORT {
-                top_bills.push_back(bill);
-            } else if top_bills.len() > MAX_ITEMS_PER_REPORT {
-                top_bills.remove(MAX_ITEMS_PER_REPORT);
-                availability = DataAvailability::Partial;
-            }
+        if total_count > MAX_ITEMS_PER_REPORT {
+            availability = DataAvailability::Partial;
         }
 
         TopNBillsReport {
@@ -1814,38 +1799,24 @@ impl ReportingContract {
             total_count += 1;
 
             // Sorted insertion for Top-N (bounded)
-            //
-            // Ordering contract (deterministic):
-            // 1) Primary: target amount descending
-            // 2) Tie-break: savings goal id ascending
-            let mut inserted = false;
-            for i in 0..top_goals.len() {
-                if let Some(existing) = top_goals.get(i) {
-                    let should_insert = if goal.target_amount > existing.target_amount {
-                        true
-                    } else if goal.target_amount < existing.target_amount {
-                        false
-                    } else {
-                        // Equal targets → deterministic tie-break by id ascending
-                        goal.id < existing.id
-                    };
-
-                    if should_insert {
-                        top_goals.insert(i, goal.clone());
-                        inserted = true;
-                        break;
+            remitwise_common::insert_top_n(
+                env,
+                &mut top_goals,
+                MAX_ITEMS_PER_REPORT,
+                goal,
+                |a, b| match a.target_amount.cmp(&b.target_amount) {
+                    core::cmp::Ordering::Equal => {
+                        // Deterministic tie-break by id ascending
+                        // Smaller ID should be Greater (appear earlier)
+                        b.id.cmp(&a.id)
                     }
-                } else {
-                    // defensive: if index is out of bounds, skip
-                    continue;
-                }
-            }
-            if !inserted && top_goals.len() < MAX_ITEMS_PER_REPORT {
-                top_goals.push_back(goal);
-            } else if top_goals.len() > MAX_ITEMS_PER_REPORT {
-                top_goals.remove(MAX_ITEMS_PER_REPORT);
-                availability = DataAvailability::Partial;
-            }
+                    other => other,
+                },
+            );
+        }
+
+        if total_count > MAX_ITEMS_PER_REPORT {
+            availability = DataAvailability::Partial;
         }
 
         TopNSavingsReport {

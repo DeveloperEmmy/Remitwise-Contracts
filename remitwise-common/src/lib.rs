@@ -128,12 +128,40 @@ pub struct RoleRevokedEvent {
 pub const DEFAULT_PAGE_LIMIT: u32 = 20;
 pub const MAX_PAGE_LIMIT: u32 = 50;
 
-/// Hard cap for top-N report items.
-///
-/// All top-N endpoints across the workspace share this limit. Any
-/// user-supplied N greater than this value must be rejected via
-/// [`require_bounded_top_n`] rather than silently clamped.
-pub const MAX_TOP_N: u32 = 10;
+/// Max items returned in Top-N reports.
+pub const MAX_ITEMS_PER_REPORT: u32 = 10;
+
+/// Helper to insert an item into a Top-N list (bounded).
+/// The list is maintained in sorted order based on the provided comparator.
+pub fn insert_top_n<T, F>(
+    _env: &Env,
+    top_list: &mut soroban_sdk::Vec<T>,
+    max_items: u32,
+    item: T,
+    mut cmp: F,
+) where
+    T: Clone
+        + soroban_sdk::IntoVal<Env, soroban_sdk::Val>
+        + soroban_sdk::TryFromVal<Env, soroban_sdk::Val>,
+    F: FnMut(&T, &T) -> core::cmp::Ordering,
+{
+    let mut inserted = false;
+    for i in 0..top_list.len() {
+        if let Some(existing) = top_list.get(i) {
+            if cmp(&item, &existing) == core::cmp::Ordering::Greater {
+                top_list.insert(i, item.clone());
+                inserted = true;
+                break;
+            }
+        }
+    }
+
+    if !inserted && top_list.len() < max_items {
+        top_list.push_back(item);
+    } else if top_list.len() > max_items {
+        top_list.remove(max_items);
+    }
+}
 
 /// Standardized TTL Constants (Ledger Counts)
 pub const DAY_IN_LEDGERS: u32 = 17280; // ~5 seconds per ledger
@@ -1061,13 +1089,7 @@ impl ToI128Checked for i32 {
 /// so that integer arithmetic can be used without floating point.
 pub const BASIS_POINTS: u32 = 10_000;
 pub const BPS_PER_PERCENT: u32 = 100;
-pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
-
-/// Basis points per one whole percentage point: 1 % = 100 bps.
-pub const BPS_PER_PERCENT: u32 = 100;
-
-/// Alias for [`BPS_PER_PERCENT`].
-pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
+pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
 
 /// Supported units for externally supplied rate inputs.
 ///
@@ -1210,9 +1232,8 @@ impl Rate {
         Self(bps)
     }
 
-    /// Construct a `Rate` from a whole percentage value.
-    ///
-    /// Returns `Ok(Rate)` if `percent * BPS_PER_PERCENT` fits in `u32`, or `Err(RateError::Overflow)` otherwise.
+    /// Create a `Rate` from a whole percentage value.
+    #[inline(always)]
     pub fn from_percent(percent: u32) -> Result<Self, RateError> {
         percent
             .checked_mul(BPS_PER_PERCENT)
@@ -1220,9 +1241,7 @@ impl Rate {
             .ok_or(RateError::Overflow)
     }
 
-    /// Construct a `Rate` from a `Percent` type.
-    ///
-    /// Returns `Ok(Rate)` if the conversion succeeds, or `Err(RateError::Overflow)` otherwise.
+    /// Create a `Rate` from a strongly-typed `Percent`.
     #[inline(always)]
     pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
         percent.to_rate()

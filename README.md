@@ -17,7 +17,7 @@ This workspace contains the core smart contracts that power RemitWise's post-rem
 - **[remitwise-common](remitwise-common/README.md)**: Shared types and utilities used across contracts
 - **[docs/PERIOD_INVARIANTS.md](docs/PERIOD_INVARIANTS.md)**: Time-bound period invariants, ledger timestamp rules, and execution windows
 - **[docs/AMOUNT_INVARIANTS.md](docs/AMOUNT_INVARIANTS.md)**: Amount zero-handling rules across contract entrypoints
-- **[docs/settlement-currency-whitelist.md](docs/settlement-currency-whitelist.md)**: Per-invoice settlement currency whitelist — mutation and guard flow
+- **[docs/config-lifecycle.md](docs/config-lifecycle.md)**: Configuration keys lifecycle (adding, deprecating, removing)
 
 ## Shared Components
 

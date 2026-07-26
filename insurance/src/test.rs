@@ -1,10 +1,9 @@
 #![allow(clippy::all)]
 #[cfg(test)]
 mod tests {
-    extern crate std;
-    use std::format;
-    use crate::*;
     extern crate alloc;
+    use crate::*;
+    use alloc::format;
     use remitwise_common::CoverageType;
     use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, Env, String, Vec};
 

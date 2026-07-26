@@ -2739,7 +2739,6 @@ fn test_initialize_split_percentages_invalid_sum() {
 }
 
 #[test]
-#[test]
 fn test_initialize_split_rejects_unsupported_ingress_token() {
     let env = Env::default();
     env.mock_all_auths();
