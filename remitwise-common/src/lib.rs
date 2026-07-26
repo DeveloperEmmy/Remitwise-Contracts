@@ -818,6 +818,173 @@ mod settlement_currency_tests {
     }
 }
 
+#[cfg(test)]
+mod symbol_validation_tests {
+    use super::*;
+    use soroban_sdk::{symbol_short, Env, Symbol};
+
+    #[test]
+    fn accepts_valid_short_symbols() {
+        let env = Env::default();
+        
+        // Test symbols at various valid lengths
+        assert_eq!(require_valid_symbol_length(&env, &symbol_short!("a")), Ok(()));
+        assert_eq!(require_valid_symbol_length(&env, &symbol_short!("abc")), Ok(()));
+        assert_eq!(require_valid_symbol_length(&env, &symbol_short!("abcdefghi")), Ok(()));
+    }
+
+    #[test]
+    fn rejects_long_symbols_that_exceed_9_bytes() {
+        let env = Env::default();
+        
+        // Create a symbol longer than 9 bytes - this will be stored as an object
+        let long_symbol = Symbol::new(&env, "this_is_longer_than_nine_bytes");
+        
+        assert_eq!(
+            require_valid_symbol_length(&env, &long_symbol),
+            Err(SymbolError::SymbolTooLong)
+        );
+    }
+
+    #[test]
+    fn handles_boundary_conditions() {
+        let env = Env::default();
+        
+        // 9 bytes exactly should pass (boundary case)
+        assert_eq!(require_valid_symbol_length(&env, &symbol_short!("123456789")), Ok(()));
+        
+        // 10+ bytes should fail
+        let ten_byte_symbol = Symbol::new(&env, "1234567890");
+        assert_eq!(
+            require_valid_symbol_length(&env, &ten_byte_symbol),
+            Err(SymbolError::SymbolTooLong)
+        );
+    }
+}
+
+#[cfg(test)]
+mod bytes_guard_tests {
+    use super::*;
+    use soroban_sdk::{Bytes, Env};
+
+    #[test]
+    fn accepts_bytes_within_limit() {
+        let env = Env::default();
+        
+        // Empty bytes
+        let empty = Bytes::new(&env);
+        assert_eq!(guard_bytes_len(&empty), Ok(()));
+        
+        // Small bytes well under limit
+        let small = Bytes::from_array(&env, &[1u8; 100]);
+        assert_eq!(guard_bytes_len(&small), Ok(()));
+        
+        // At the exact limit (MAX_BYTES_RETURN = 8192)
+        let at_limit = Bytes::from_array(&env, &[1u8; MAX_BYTES_RETURN as usize]);
+        assert_eq!(guard_bytes_len(&at_limit), Ok(()));
+    }
+
+    #[test]
+    fn rejects_bytes_exceeding_limit() {
+        let env = Env::default();
+        
+        // Just over the limit
+        let over_limit = Bytes::from_array(&env, &[1u8; (MAX_BYTES_RETURN + 1) as usize]);
+        assert_eq!(
+            guard_bytes_len(&over_limit),
+            Err(BytesReturnError::ReturnTooLarge)
+        );
+    }
+
+    #[test] 
+    fn handles_boundary_at_max_bytes_return() {
+        let env = Env::default();
+        
+        // Test exactly at the boundary
+        let exactly_at_limit = Bytes::from_array(&env, &[0u8; MAX_BYTES_RETURN as usize]);
+        assert_eq!(guard_bytes_len(&exactly_at_limit), Ok(()));
+        
+        // One byte over the boundary
+        let one_over = Bytes::from_array(&env, &[0u8; (MAX_BYTES_RETURN + 1) as usize]);
+        assert_eq!(guard_bytes_len(&one_over), Err(BytesReturnError::ReturnTooLarge));
+    }
+}
+
+#[cfg(test)]
+mod snapshot_freshness_tests {
+    use super::*;
+    use soroban_sdk::{testutils::Ledger, Env};
+
+    #[test]
+    fn accepts_fresh_snapshot() {
+        let env = Env::default();
+        let current_time = 1_000_000u64;
+        
+        env.ledger().with_mut(|li| {
+            li.timestamp = current_time;
+        });
+        
+        // Snapshot taken recently (1 hour ago)
+        let snapshot_time = current_time - 3600;
+        assert_eq!(require_recent_snapshot(&env, snapshot_time), Ok(()));
+        
+        // Snapshot taken at current time
+        assert_eq!(require_recent_snapshot(&env, current_time), Ok(()));
+    }
+
+    #[test]
+    fn rejects_stale_snapshot() {
+        let env = Env::default();
+        let current_time = 1_000_000u64;
+        
+        env.ledger().with_mut(|li| {
+            li.timestamp = current_time;
+        });
+        
+        // Snapshot older than SNAPSHOT_MAX_AGE_SECS (30 days)
+        let stale_time = current_time - SNAPSHOT_MAX_AGE_SECS - 1;
+        assert_eq!(
+            require_recent_snapshot(&env, stale_time),
+            Err(SnapshotError::SnapshotTooOld)
+        );
+    }
+
+    #[test]
+    fn handles_boundary_at_max_age() {
+        let env = Env::default();
+        let current_time = 1_000_000u64;
+        
+        env.ledger().with_mut(|li| {
+            li.timestamp = current_time;
+        });
+        
+        // Exactly at the max age boundary (should pass)
+        let at_boundary = current_time - SNAPSHOT_MAX_AGE_SECS;
+        assert_eq!(require_recent_snapshot(&env, at_boundary), Ok(()));
+        
+        // One second over the boundary (should fail)
+        let over_boundary = current_time - SNAPSHOT_MAX_AGE_SECS - 1;
+        assert_eq!(
+            require_recent_snapshot(&env, over_boundary),
+            Err(SnapshotError::SnapshotTooOld)
+        );
+    }
+
+    #[test]
+    fn handles_timestamp_underflow_gracefully() {
+        let env = Env::default();
+        let current_time = 1000u64; // Small current time
+        
+        env.ledger().with_mut(|li| {
+            li.timestamp = current_time;
+        });
+        
+        // Snapshot time in the future (should use saturating_sub)
+        let future_time = current_time + 1000;
+        assert_eq!(require_recent_snapshot(&env, future_time), Ok(()));
+    }
+}
+
 /// Minimum transfer amount to prevent gas grief.
 pub const MIN_TRANSFER: i128 = 100;
 
@@ -1009,6 +1176,202 @@ pub fn clamp_limit(limit: u32) -> u32 {
     }
 }
 
+#[cfg(test)]
+mod rate_limiting_tests {
+    use super::*;
+    use soroban_sdk::{symbol_short, testutils::Address as AddressTrait, Address, Env};
+
+    #[test]
+    fn allows_requests_within_limit() {
+        let env = Env::default();
+        let caller = Address::generate(&env);
+        let operation = symbol_short!("test_op");
+        let limit = 5u32;
+
+        // First request should succeed
+        assert_eq!(
+            check_and_increment_rate_limit(&env, &caller, operation, limit),
+            Ok(())
+        );
+
+        // Multiple requests within limit should succeed
+        for _ in 0..4 {
+            assert_eq!(
+                check_and_increment_rate_limit(&env, &caller, operation, limit),
+                Ok(())
+            );
+        }
+
+        // At this point we've made 5 requests, which equals the limit
+        // Next request should fail
+        assert_eq!(
+            check_and_increment_rate_limit(&env, &caller, operation, limit),
+            Err(RateLimitError::RateLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn isolates_rate_limits_by_caller() {
+        let env = Env::default();
+        let caller1 = Address::generate(&env);
+        let caller2 = Address::generate(&env);
+        let operation = symbol_short!("test_op");
+        let limit = 2u32;
+
+        // Caller1 uses up their limit
+        assert_eq!(
+            check_and_increment_rate_limit(&env, &caller1, operation, limit),
+            Ok(())
+        );
+        assert_eq!(
+            check_and_increment_rate_limit(&env, &caller1, operation, limit),
+            Ok(())
+        );
+        assert_eq!(
+            check_and_increment_rate_limit(&env, &caller1, operation, limit),
+            Err(RateLimitError::RateLimitExceeded)
+        );
+
+        // Caller2 should still be able to make requests
+        assert_eq!(
+            check_and_increment_rate_limit(&env, &caller2, operation, limit),
+            Ok(())
+        );
+        assert_eq!(
+            check_and_increment_rate_limit(&env, &caller2, operation, limit),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn isolates_rate_limits_by_operation() {
+        let env = Env::default();
+        let caller = Address::generate(&env);
+        let operation1 = symbol_short!("op1");
+        let operation2 = symbol_short!("op2");
+        let limit = 1u32;
+
+        // Use up limit for operation1
+        assert_eq!(
+            check_and_increment_rate_limit(&env, &caller, operation1, limit),
+            Ok(())
+        );
+        assert_eq!(
+            check_and_increment_rate_limit(&env, &caller, operation1, limit),
+            Err(RateLimitError::RateLimitExceeded)
+        );
+
+        // operation2 should still work
+        assert_eq!(
+            check_and_increment_rate_limit(&env, &caller, operation2, limit),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn handles_rate_limit_window_boundaries() {
+        let env = Env::default();
+        let caller = Address::generate(&env);
+        let operation = symbol_short!("test_op");
+        let limit = 1u32;
+
+        // Set initial time
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000;
+        });
+
+        // Use up the limit in the first window
+        assert_eq!(
+            check_and_increment_rate_limit(&env, &caller, operation, limit),
+            Ok(())
+        );
+        assert_eq!(
+            check_and_increment_rate_limit(&env, &caller, operation, limit),
+            Err(RateLimitError::RateLimitExceeded)
+        );
+
+        // Advance time to next rate limit window (24 hours later)
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1000 + RATE_LIMIT_WINDOW_SECONDS;
+        });
+
+        // Should be able to make requests again
+        assert_eq!(
+            check_and_increment_rate_limit(&env, &caller, operation, limit),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn get_rate_limit_status_returns_correct_values() {
+        let env = Env::default();
+        let caller = Address::generate(&env);
+        let operation = symbol_short!("test_op");
+        let limit = 3u32;
+
+        // Initially should have 0 count
+        let (count, window_end) = get_rate_limit_status(&env, &caller, operation);
+        assert_eq!(count, 0);
+        assert_eq!(window_end, RATE_LIMIT_WINDOW_SECONDS);
+
+        // After one request, count should be 1
+        check_and_increment_rate_limit(&env, &caller, operation, limit).unwrap();
+        let (count, _) = get_rate_limit_status(&env, &caller, operation);
+        assert_eq!(count, 1);
+
+        // After two more requests, count should be 3
+        check_and_increment_rate_limit(&env, &caller, operation, limit).unwrap();
+        check_and_increment_rate_limit(&env, &caller, operation, limit).unwrap();
+        let (count, _) = get_rate_limit_status(&env, &caller, operation);
+        assert_eq!(count, 3);
+    }
+}
+
+#[cfg(test)]
+mod pagination_limit_tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_zero_to_default_limit() {
+        assert_eq!(clamp_limit(0), DEFAULT_PAGE_LIMIT);
+    }
+
+    #[test]
+    fn preserves_valid_limits_unchanged() {
+        assert_eq!(clamp_limit(1), 1);
+        assert_eq!(clamp_limit(20), 20);
+        assert_eq!(clamp_limit(DEFAULT_PAGE_LIMIT), DEFAULT_PAGE_LIMIT);
+        assert_eq!(clamp_limit(MAX_PAGE_LIMIT), MAX_PAGE_LIMIT);
+    }
+
+    #[test]
+    fn clamps_excessive_limits_to_max() {
+        assert_eq!(clamp_limit(MAX_PAGE_LIMIT + 1), MAX_PAGE_LIMIT);
+        assert_eq!(clamp_limit(1000), MAX_PAGE_LIMIT);
+        assert_eq!(clamp_limit(u32::MAX), MAX_PAGE_LIMIT);
+    }
+
+    #[test]
+    fn handles_boundary_conditions() {
+        // Test around the boundary values
+        assert_eq!(clamp_limit(MAX_PAGE_LIMIT - 1), MAX_PAGE_LIMIT - 1);
+        assert_eq!(clamp_limit(MAX_PAGE_LIMIT), MAX_PAGE_LIMIT);
+        assert_eq!(clamp_limit(MAX_PAGE_LIMIT + 1), MAX_PAGE_LIMIT);
+    }
+
+    #[test]
+    fn is_idempotent() {
+        // Applying clamp_limit twice should give same result
+        let test_values = [0, 1, 25, MAX_PAGE_LIMIT, MAX_PAGE_LIMIT + 100, u32::MAX];
+        
+        for value in test_values {
+            let clamped_once = clamp_limit(value);
+            let clamped_twice = clamp_limit(clamped_once);
+            assert_eq!(clamped_once, clamped_twice, "clamp_limit is not idempotent for {}", value);
+        }
+    }
+}
+
 /// Pro-rata distribution helper
 ///
 /// Maximum safe weight for a single pro-rata bucket.
@@ -1181,6 +1544,9 @@ pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
 pub const BPS_PER_PERCENT: u32 = 100;
 pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
 
+/// Basis points per percent: 100 bps = 1%.
+pub const BPS_PER_PERCENT: u32 = 100;
+
 /// Supported units for externally supplied rate inputs.
 ///
 /// Remitwise contracts currently accept only basis points. Treating a raw rate
@@ -1256,7 +1622,7 @@ impl Percent {
     ///
     /// Returns `Ok(Rate)` if `percent * 100` fits in `u32`, or `Err(RateError::Overflow)` otherwise.
     pub fn to_rate(self) -> Result<Rate, RateError> {
-        Rate::from_percent(self.0)
+        Ok(Rate::from_percent(self.0))
     }
 
     /// Convert this `Percent` to raw basis points (`u32`).
@@ -1323,20 +1689,13 @@ impl Rate {
         Self(bps)
     }
 
-    /// Create a `Rate` from a whole percentage value.
+    /// Create a `Rate` from a percentage value.
     ///
-    /// Returns `Ok(Rate)` if `percent * 100` fits in `u32`, or `Err(RateError::Overflow)` otherwise.
-    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
-        percent
-            .checked_mul(BPS_PER_PERCENT)
-            .map(Self::from_bps)
-            .ok_or(RateError::Overflow)
-    }
-
-    /// Create a `Rate` from a `Percent` newtype instance.
+    /// Converts percentage to basis points by multiplying by BPS_PER_PERCENT (100).
+    /// For example: 5% becomes 500 basis points.
     #[inline(always)]
-    pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
-        percent.to_rate()
+    pub fn from_percent(percent: u32) -> Self {
+        Self(percent.saturating_mul(BPS_PER_PERCENT))
     }
 
     /// Construct a `Rate` from an externally supplied raw value plus unit.
@@ -1382,12 +1741,16 @@ impl Rate {
     }
 
     /// Convert this rate back to a whole percentage integer value, truncating fractional basis points.
+    ///
+    /// For example: 550 bps becomes 5%.
     #[inline(always)]
     pub fn to_percent(self) -> u32 {
         self.0 / BPS_PER_PERCENT
     }
 
     /// Return true if this rate contains a fractional percentage (basis points not divisible by 100).
+    ///
+    /// For example: 550 bps returns true (0.5% fractional), 500 bps returns false (exactly 5%).
     #[inline(always)]
     #[allow(clippy::manual_is_multiple_of)]
     pub fn has_fractional_percent(self) -> bool {
