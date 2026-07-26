@@ -331,6 +331,7 @@ To run an example, use `cargo run --example <example_name>`:
 - [Pause Playbook](docs/PAUSE_PLAYBOOK.md) - Emergency pause mechanisms and recovery procedures for operators
 - [Committed Hashes](docs/COMMITTED_HASHES.md) - Request-hash coverage and verification guidance for downstream integrators
 - [Zero-Amount Policy](docs/ZERO_AMOUNT_POLICY.md) - Which entrypoints reject, accept, or normalize zero amounts; quick reference for integrators
+- [Entrypoint N Caps](docs/ENTRYPOINT_N_CAPS.md) - Per-entrypoint record-count upper bounds (N caps), error codes, slot-release rules, and reviewer checklist
 - [Family Wallet Design (as implemented)](docs/family-wallet-design.md)
 - [Reporting Admin Rotation](docs/reporting-admin-rotation.md) - Two-step upgrade-admin handoff procedure for reporting dependency configuration
 - [Event Indexing Guide](docs/INDEXING.md) - Mapping contract events to off-chain tables
