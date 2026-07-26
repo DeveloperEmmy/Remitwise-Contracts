@@ -150,6 +150,48 @@ Validates and canonicalizes tags with error handling.
 
 Emits a standardized event.
 
+### `emit_audit(env, op, actor, meta)` — shared audit-event helper (#1268)
+
+Emits a compliance-level audit event with a canonical schema, ensuring all
+contracts produce audit events that indexers and compliance tools can subscribe
+to with a single filter.
+
+**Topic schema** (4-element tuple, always identical):
+
+```text
+("Remitwise", 5 /*Compliance*/, 2 /*High*/, "audit")
+```
+
+**Arguments:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `env`   | `&Env`    | Soroban environment |
+| `op`    | `Symbol`  | Short symbol identifying the operation (e.g. `symbol_short!("flow_exec")`) |
+| `actor` | `&Address`| Principal that triggered the operation |
+| `meta`  | `T: IntoVal` | Compact operation-specific payload (amount, result, IDs…) |
+
+**Constraints:**
+- `meta` must serialise to ≤ 256 XDR bytes (enforced by a test-build panic).
+- `op` must be a short symbol (≤ 9 bytes).
+
+**Example:**
+
+```rust
+use remitwise_common::emit_audit;
+use soroban_sdk::symbol_short;
+
+// Emit an audit event for a completed settlement:
+emit_audit(&env, symbol_short!("settle"), &caller, (amount, true));
+
+// Emit an audit event for an access check:
+emit_audit(&env, symbol_short!("access"), &member, role_discriminant);
+```
+
+**Migration note:** Contracts that previously rolled inline audit publish calls
+can be migrated to `emit_audit` without changing the storage layout — the helper
+only emits an event, it does not write to storage.
+
 ## Running Tests
 
 ```bash

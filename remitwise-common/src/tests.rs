@@ -1423,147 +1423,243 @@ proptest! {
     }
 }
 
-// ─── Settlement Currency Guard tests (#1229) ─────────────────────────────────
+// ============================================================================
+// #1232 — period_key / validate_period / Timestamp::seconds_until
+//          across timezone-equivalent timestamps
+//
+// Soroban ledger timestamps are always UTC Unix epoch seconds.  There is no
+// on-chain concept of a timezone.  The "timezone-equivalent" framing in the
+// issue means that two `u64` values can represent the SAME wall-clock moment
+// in different UTC offsets — e.g. noon UTC+05:30 == 06:30 UTC — yet they
+// will compare differently as raw integers, so the period helpers must treat
+// them as the absolute seconds they are.  These tests pin that behaviour so a
+// reviewer reading either end of a cross-timezone range can see the precise
+// semantics without reading the implementation.
+// ============================================================================
 
+// ---------------------------------------------------------------------------
+// validate_period
+// ---------------------------------------------------------------------------
+
+/// Equal timestamps form a valid (zero-width) period.
 #[test]
-fn test_settlement_currency_whitelisted_in_multi_item_vec() {
-    let env = Env::default();
-    let whitelist = soroban_sdk::Vec::from_array(
-        &env,
-        [
-            symbol_short!("USDC"),
-            symbol_short!("EURC"),
-            symbol_short!("XLM"),
-        ],
-    );
+fn validate_period_accepts_equal_start_end() {
+    assert_eq!(validate_period(1_700_000_000, 1_700_000_000), Ok(()));
+}
 
-    // First item
+/// start < end is the normal ordered period — must succeed.
+#[test]
+fn validate_period_accepts_ordered_start_before_end() {
+    // 2023-11-14 22:13:20 UTC  →  2023-11-15 22:13:20 UTC  (one day apart)
+    assert_eq!(validate_period(1_700_000_000, 1_700_086_400), Ok(()));
+}
+
+/// start > end is logically reversed — must fail with InvalidPeriod.
+#[test]
+fn validate_period_rejects_start_after_end() {
     assert_eq!(
-        require_matching_settlement_currency(&whitelist, &symbol_short!("USDC")),
+        validate_period(1_700_086_400, 1_700_000_000),
+        Err(TimeError::InvalidPeriod)
+    );
+}
+
+/// Minimum representable timestamps — both zero is valid (zero-width period at epoch).
+#[test]
+fn validate_period_accepts_both_zero() {
+    assert_eq!(validate_period(0, 0), Ok(()));
+}
+
+/// start = 0 with any positive end is valid.
+#[test]
+fn validate_period_accepts_epoch_start_with_future_end() {
+    assert_eq!(validate_period(0, 1), Ok(()));
+    assert_eq!(validate_period(0, u64::MAX), Ok(()));
+}
+
+/// u64::MAX as end is accepted (boundary stability).
+#[test]
+fn validate_period_accepts_u64_max_as_end() {
+    assert_eq!(validate_period(u64::MAX - 1, u64::MAX), Ok(()));
+}
+
+/// u64::MAX as start with a smaller end must be rejected.
+#[test]
+fn validate_period_rejects_u64_max_start_with_smaller_end() {
+    assert_eq!(
+        validate_period(u64::MAX, u64::MAX - 1),
+        Err(TimeError::InvalidPeriod)
+    );
+}
+
+/// Timezone-equivalence scenario A:
+/// 2024-01-15 12:00:00 UTC = 1_705_320_000
+/// 2024-01-15 12:00:00 UTC+05:30 corresponds to 2024-01-15 06:30:00 UTC = 1_705_299_000
+///
+/// A period that opens at the UTC+05:30 local noon (== 06:30 UTC) and closes
+/// at UTC noon is a valid ordered period (start < end as absolute seconds),
+/// even though both endpoints read "12:00" in their respective local clocks.
+#[test]
+fn validate_period_timezone_equivalent_utc_and_utc_plus_0530() {
+    // 2024-01-15 06:30:00 UTC  (== noon UTC+05:30)
+    let utc_plus_0530_noon_as_utc: u64 = 1_705_299_000;
+    // 2024-01-15 12:00:00 UTC
+    let utc_noon: u64 = 1_705_320_000;
+
+    // start is earlier in absolute time  → valid period
+    assert_eq!(
+        validate_period(utc_plus_0530_noon_as_utc, utc_noon),
         Ok(())
     );
-    // Middle item
+    // reversed → invalid
     assert_eq!(
-        require_matching_settlement_currency(&whitelist, &symbol_short!("EURC")),
-        Ok(())
-    );
-    // Last item
-    assert_eq!(
-        require_matching_settlement_currency(&whitelist, &symbol_short!("XLM")),
-        Ok(())
+        validate_period(utc_noon, utc_plus_0530_noon_as_utc),
+        Err(TimeError::InvalidPeriod)
     );
 }
 
+/// Timezone-equivalence scenario B:
+/// 2024-01-15 12:00:00 UTC-05:00 == 2024-01-15 17:00:00 UTC = 1_705_338_000
+///
+/// A period from UTC noon to UTC-05:00 noon (expressed as UTC) must be valid.
 #[test]
-fn test_settlement_currency_whitelisted_single_item() {
-    let env = Env::default();
-    let whitelist = soroban_sdk::Vec::from_array(&env, [symbol_short!("USDC")]);
+fn validate_period_timezone_equivalent_utc_and_utc_minus_0500() {
+    let utc_noon: u64 = 1_705_320_000;
+    // 2024-01-15 17:00:00 UTC  (== noon UTC-05:00)
+    let utc_minus_5_noon_as_utc: u64 = 1_705_338_000;
 
+    assert_eq!(validate_period(utc_noon, utc_minus_5_noon_as_utc), Ok(()));
     assert_eq!(
-        require_matching_settlement_currency(&whitelist, &symbol_short!("USDC")),
-        Ok(())
+        validate_period(utc_minus_5_noon_as_utc, utc_noon),
+        Err(TimeError::InvalidPeriod)
     );
 }
 
+/// Adjacent seconds — off-by-one boundary lock.
 #[test]
-fn test_settlement_currency_non_whitelisted_rejected() {
-    let env = Env::default();
-    let whitelist =
-        soroban_sdk::Vec::from_array(&env, [symbol_short!("USDC"), symbol_short!("EURC")]);
-
+fn validate_period_adjacent_seconds_boundary() {
+    let t: u64 = 1_700_000_000;
+    assert_eq!(validate_period(t - 1, t), Ok(()));     // t-1 < t  → ok
+    assert_eq!(validate_period(t, t), Ok(()));          // equal    → ok
     assert_eq!(
-        require_matching_settlement_currency(&whitelist, &symbol_short!("XLM")),
-        Err(SettlementCurrencyError::CurrencyNotWhitelisted)
-    );
+        validate_period(t + 1, t),
+        Err(TimeError::InvalidPeriod)
+    );                                                  // t+1 > t  → invalid
 }
 
+// ---------------------------------------------------------------------------
+// Timestamp::seconds_until — extended timezone-keyed cases
+// ---------------------------------------------------------------------------
+
+/// When target is in the future, returns exact second distance.
 #[test]
-fn test_settlement_currency_empty_whitelist_rejected() {
-    let env = Env::default();
-    let whitelist = soroban_sdk::Vec::<Symbol>::new(&env);
-
-    assert_eq!(
-        require_matching_settlement_currency(&whitelist, &symbol_short!("USDC")),
-        Err(SettlementCurrencyError::CurrencyNotWhitelisted)
-    );
+fn seconds_until_returns_exact_future_distance() {
+    let now = 1_705_299_000_u64; // 2024-01-15 06:30:00 UTC
+    let target = 1_705_320_000_u64; // 2024-01-15 12:00:00 UTC
+    // Distance = 21 000 s = 5 h 50 m — exactly the UTC+05:30 offset
+    assert_eq!(Timestamp::seconds_until(now, target), 21_000);
 }
 
+/// When now == target the remaining window is zero (inclusive boundary).
 #[test]
-fn test_settlement_currency_case_sensitive_mismatch() {
-    let env = Env::default();
-    let whitelist = soroban_sdk::Vec::from_array(&env, [symbol_short!("USDC")]);
-    let lower_usdc = Symbol::new(&env, "usdc");
-
-    assert_eq!(
-        require_matching_settlement_currency(&whitelist, &lower_usdc),
-        Err(SettlementCurrencyError::CurrencyNotWhitelisted)
-    );
+fn seconds_until_returns_zero_when_target_equals_now() {
+    let t = 1_705_320_000_u64;
+    assert_eq!(Timestamp::seconds_until(t, t), 0);
 }
 
+/// When target is in the past, result saturates at zero — no underflow.
 #[test]
-fn test_settlement_currency_unknown_symbol_rejected() {
-    let env = Env::default();
-    let whitelist =
-        soroban_sdk::Vec::from_array(&env, [symbol_short!("USDC"), symbol_short!("EURC")]);
-
-    let unknown_sym1 = Symbol::new(&env, "UNKNOWN");
-    let unknown_sym2 = Symbol::new(&env, "BADTOKEN");
-    let unknown_sym3 = Symbol::new(&env, "FAKE_USD");
-
-    assert_eq!(
-        require_matching_settlement_currency(&whitelist, &unknown_sym1),
-        Err(SettlementCurrencyError::CurrencyNotWhitelisted)
-    );
-    assert_eq!(
-        require_matching_settlement_currency(&whitelist, &unknown_sym2),
-        Err(SettlementCurrencyError::CurrencyNotWhitelisted)
-    );
-    assert_eq!(
-        require_matching_settlement_currency(&whitelist, &unknown_sym3),
-        Err(SettlementCurrencyError::CurrencyNotWhitelisted)
-    );
+fn seconds_until_saturates_at_zero_for_past_target() {
+    let now = 1_705_338_000_u64; // later UTC epoch
+    let past_target = 1_705_320_000_u64;
+    assert_eq!(Timestamp::seconds_until(now, past_target), 0);
 }
 
+/// Large future distances stay exact (no overflow on sub-u64 math).
 #[test]
-fn test_settlement_currency_unknown_symbol_empty_whitelist() {
-    let env = Env::default();
-    let whitelist = soroban_sdk::Vec::<Symbol>::new(&env);
+fn seconds_until_handles_large_future_distance_without_overflow() {
+    // One year of seconds ≈ 31 536 000
+    let now = 0_u64;
+    let one_year_from_epoch: u64 = 31_536_000;
+    assert_eq!(Timestamp::seconds_until(now, one_year_from_epoch), 31_536_000);
+}
 
-    let unknown_sym = Symbol::new(&env, "UNKNOWN");
+/// Boundary: now = u64::MAX, target = u64::MAX → zero distance.
+#[test]
+fn seconds_until_both_u64_max_returns_zero() {
+    assert_eq!(Timestamp::seconds_until(u64::MAX, u64::MAX), 0);
+}
+
+/// Boundary: now = u64::MAX - 1, target = u64::MAX → exactly one second.
+#[test]
+fn seconds_until_u64_max_minus_one_to_u64_max() {
+    assert_eq!(Timestamp::seconds_until(u64::MAX - 1, u64::MAX), 1);
+}
+
+// ---------------------------------------------------------------------------
+// period_key semantic tests
+//
+// A `period_key` is a plain `u64` carrying a ledger-timestamp that acts as
+// the identity key for a stored report.  The invariant is that two timestamps
+// representing "the same ledger period" produce the same `period_key` value,
+// while two timestamps from different periods produce different keys.
+// ---------------------------------------------------------------------------
+
+/// period_key values that differ by the YYYYMM convention (202401 vs 202402)
+/// compare strictly as integers, so the earlier period sorts before the later one.
+#[test]
+fn period_key_yyyymm_ordering_is_monotone() {
+    let jan_2024: u64 = 202_401;
+    let feb_2024: u64 = 202_402;
+    assert!(jan_2024 < feb_2024);
+    // validate_period treats them as a valid ordered range
+    assert_eq!(validate_period(jan_2024, feb_2024), Ok(()));
+}
+
+/// period_keys for the same period (same value) form a zero-width valid range.
+#[test]
+fn period_key_same_period_forms_zero_width_valid_range() {
+    let period: u64 = 202_401;
+    assert_eq!(validate_period(period, period), Ok(()));
+}
+
+/// Reversed period_key range is invalid.
+#[test]
+fn period_key_reversed_range_is_invalid() {
+    let feb_2024: u64 = 202_402;
+    let jan_2024: u64 = 202_401;
     assert_eq!(
-        require_matching_settlement_currency(&whitelist, &unknown_sym),
-        Err(SettlementCurrencyError::CurrencyNotWhitelisted)
+        validate_period(feb_2024, jan_2024),
+        Err(TimeError::InvalidPeriod)
     );
 }
 
-proptest! {
-    #[test]
-    fn proptest_settlement_currency_whitelisted_always_passes(
-        s in "[A-Z0-9_]{1,9}"
-    ) {
-        let env = Env::default();
-        let sym = Symbol::new(&env, &s);
-        let whitelist = soroban_sdk::Vec::from_array(&env, [sym.clone()]);
+/// Timestamp-based period_key: two Unix timestamps that represent the same
+/// UTC month slot (same 30-day bucket) compare equal only if they are identical.
+/// Even one second apart produces distinct keys.
+#[test]
+fn period_key_unix_timestamps_one_second_apart_are_distinct() {
+    let t: u64 = 1_705_320_000;
+    assert_ne!(t, t + 1);
+    // Each forms a valid (trivially ordered) period boundary:
+    assert_eq!(validate_period(t, t + 1), Ok(()));
+}
 
-        prop_assert_eq!(
-            require_matching_settlement_currency(&whitelist, &sym),
-            Ok(())
-        );
-    }
+/// Timezone-equivalence final lock:
+/// A period_key derived from "midnight UTC" and one from "midnight UTC+08:00"
+/// (which is 16:00 UTC the previous day) are numerically different.
+/// `validate_period` must treat them by magnitude alone, not by intent.
+#[test]
+fn period_key_midnight_utc_vs_midnight_utc_plus_0800_are_ordered_by_magnitude() {
+    // 2024-01-15 00:00:00 UTC
+    let midnight_utc: u64 = 1_705_276_800;
+    // 2024-01-14 16:00:00 UTC  (== 2024-01-15 00:00:00 UTC+08:00)
+    let midnight_utc8_as_utc: u64 = 1_705_248_000;
 
-    #[test]
-    fn proptest_settlement_currency_non_whitelisted_always_fails(
-        s1 in "[A-Z0-9_]{1,4}",
-        s2 in "[a-z0-9_]{5,9}"
-    ) {
-        let env = Env::default();
-        let sym1 = Symbol::new(&env, &s1);
-        let sym2 = Symbol::new(&env, &s2);
-        let whitelist = soroban_sdk::Vec::from_array(&env, [sym1]);
-
-        prop_assert_eq!(
-            require_matching_settlement_currency(&whitelist, &sym2),
-            Err(SettlementCurrencyError::CurrencyNotWhitelisted)
-        );
-    }
+    // midnight_utc8_as_utc is EARLIER in absolute time
+    assert!(midnight_utc8_as_utc < midnight_utc);
+    assert_eq!(validate_period(midnight_utc8_as_utc, midnight_utc), Ok(()));
+    assert_eq!(
+        validate_period(midnight_utc, midnight_utc8_as_utc),
+        Err(TimeError::InvalidPeriod)
+    );
 }

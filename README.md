@@ -344,7 +344,7 @@ To run an example, use `cargo run --example <example_name>`:
 - [Frontend Integration Notes](docs/frontend-integration.md)
 - [String and Bytes Canonicalisation](docs/CANONICALISATION.md) - Tag casefold, currency trim/uppercase, external-ref charset, and migration checksum byte-order
 - [Type-Safe Percent Conversion](docs/type-safe-percent-conversion.md) - Converting whole percentages to basis points with checked overflow arithmetic
-- [Gas Unit Costs Reference](docs/GAS_UNIT_COSTS.md) - Per-instruction CPU/memory/ledger-I/O costs, network limits, and per-contract benchmark table
+- [Shared Audit-Event Helper](docs/emit-audit-helper.md) - `emit_audit(op, actor, meta)` — one place to emit compliance audit events with enforced schema
 - [Storage Layout Reference](STORAGE_LAYOUT.md)
 - [Reserved Storage Keys](docs/RESERVED_STORAGE_KEYS.md) - Storage keys reserved for roadmap features to prevent collisions (contributor guide)
 - [Contract Specs & Migrations](docs/MIGRATIONS.md) - How to bump a contract spec without breaking existing storage
