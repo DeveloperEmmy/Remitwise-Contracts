@@ -376,6 +376,21 @@ mod non_zero_amount_tests {
 // Settlement currency validation
 // ---------------------------------------------------------------------------
 
+/// Configuration for settlement-currency whitelist validation.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct SettlementCurrencyConfig {
+    /// Maximum number of currencies the invoice whitelist may contain.
+    pub max_whitelist_size: u32,
+}
+
+impl Default for SettlementCurrencyConfig {
+    fn default() -> Self {
+        Self {
+            max_whitelist_size: 10,
+        }
+    }
+}
+
 /// Error returned when a settlement's currency is not accepted by the invoice.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -384,6 +399,8 @@ pub enum SettlementCurrencyError {
     /// `sym` is not present in the invoice's whitelist of accepted
     /// settlement currencies.
     CurrencyNotWhitelisted = 1,
+    /// The invoice whitelist exceeds the configured cap for settlement currency validation.
+    WhitelistTooLarge = 2,
 }
 
 /// Guards that a settlement's currency (`sym`) is one of the currencies the
@@ -419,6 +436,20 @@ pub fn require_matching_settlement_currency(
     inv: &soroban_sdk::Vec<Symbol>,
     sym: &Symbol,
 ) -> Result<(), SettlementCurrencyError> {
+    require_matching_settlement_currency_with_config(inv, sym, &SettlementCurrencyConfig::default())
+}
+
+/// Guards that a settlement's currency (`sym`) is one of the currencies the
+/// invoice (`inv`) is willing to accept, subject to a configurable whitelist cap.
+pub fn require_matching_settlement_currency_with_config(
+    inv: &soroban_sdk::Vec<Symbol>,
+    sym: &Symbol,
+    config: &SettlementCurrencyConfig,
+) -> Result<(), SettlementCurrencyError> {
+    if inv.len() > config.max_whitelist_size {
+        return Err(SettlementCurrencyError::WhitelistTooLarge);
+    }
+
     for accepted in inv.iter() {
         if &accepted == sym {
             return Ok(());
@@ -477,6 +508,30 @@ mod settlement_currency_tests {
         assert_eq!(
             require_matching_settlement_currency(&whitelist, &symbol_short!("XLM")),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_whitelist_exceeding_configured_cap() {
+        let env = Env::default();
+        let whitelist = soroban_sdk::Vec::from_array(
+            &env,
+            [
+                symbol_short!("USDC"),
+                symbol_short!("EURC"),
+                symbol_short!("XLM"),
+            ],
+        );
+        let config = SettlementCurrencyConfig {
+            max_whitelist_size: 2,
+        };
+        assert_eq!(
+            require_matching_settlement_currency_with_config(
+                &whitelist,
+                &symbol_short!("XLM"),
+                &config
+            ),
+            Err(SettlementCurrencyError::WhitelistTooLarge)
         );
     }
 }
@@ -1378,17 +1433,7 @@ pub enum StableCurrencyError {
 /// This is a defence-in-depth allowlist of well-known stablecoins.
 /// Rebase/deflationary/elastic-supply tokens (e.g., AMPL, OHM, TIME) are intentionally excluded.
 const STABLE_CURRENCIES: &[&str] = &[
-    "USDC",
-    "USDT",
-    "USDP",
-    "BUSD",
-    "GUSD",
-    "TUSD",
-    "USDD",
-    "EURC",
-    "EURS",
-    "DAI",
-    "XLM",
+    "USDC", "USDT", "USDP", "BUSD", "GUSD", "TUSD", "USDD", "EURC", "EURS", "DAI", "XLM",
 ];
 
 /// Validates that a currency symbol represents a supported stable asset.
