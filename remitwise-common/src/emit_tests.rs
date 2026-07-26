@@ -1,6 +1,6 @@
 use crate::{EventCategory, EventPriority, RemitwiseEvents};
-use soroban_sdk::testutils::Events;
-use soroban_sdk::{symbol_short, Env, FromVal, Vec};
+use soroban_sdk::testutils::Events as _;
+use soroban_sdk::{symbol_short, Env, Vec};
 
 #[test]
 fn test_compact_event_passes() {
@@ -56,9 +56,10 @@ fn test_emit_topics_include_remitwise_sentinel() {
     });
     let events = env.events().all();
     assert!(!events.is_empty());
-    // The first topic element must be the Remitwise sentinel symbol.
-    let (_cid, topics, _data) = events.last().unwrap();
-    let sentinel: soroban_sdk::Symbol = FromVal::from_val(&env, &topics.get(0).unwrap());
+    // events().all() returns Vec<(ContractId, Topics, Data)>
+    let (_, topics, _) = events.last().unwrap();
+    let sentinel: soroban_sdk::Symbol =
+        soroban_sdk::FromVal::from_val(&env, &topics.get(0).unwrap());
     let expected = soroban_sdk::Symbol::new(&env, "Remitwise");
     assert_eq!(sentinel, expected);
 }
@@ -77,7 +78,7 @@ fn test_emit_encodes_category_as_second_topic() {
         );
     });
     let events = env.events().all();
-    let (_cid, topics, _data) = events.last().unwrap();
+    let (_, topics, _) = events.last().unwrap();
     let cat_raw: u32 = soroban_sdk::FromVal::from_val(&env, &topics.get(1).unwrap());
     assert_eq!(cat_raw, EventCategory::Compliance.to_u32());
 }
@@ -96,7 +97,7 @@ fn test_emit_encodes_priority_as_third_topic() {
         );
     });
     let events = env.events().all();
-    let (_cid, topics, _data) = events.last().unwrap();
+    let (_, topics, _) = events.last().unwrap();
     let prio_raw: u32 = soroban_sdk::FromVal::from_val(&env, &topics.get(2).unwrap());
     assert_eq!(prio_raw, EventPriority::Critical.to_u32());
 }
@@ -106,7 +107,7 @@ fn test_emit_batch_uses_low_priority_topic() {
     let env = Env::default();
     RemitwiseEvents::emit_batch(&env, EventCategory::Transaction, symbol_short!("batch"), 5);
     let events = env.events().all();
-    let (_cid, topics, _data) = events.last().unwrap();
+    let (_, topics, _) = events.last().unwrap();
     let prio_raw: u32 = soroban_sdk::FromVal::from_val(&env, &topics.get(2).unwrap());
     assert_eq!(prio_raw, EventPriority::Low.to_u32());
 }

@@ -6,6 +6,7 @@ use soroban_sdk::{
     testutils::{Address as _, Ledger},
     Address, Env, Symbol,
 };
+use testutils::same_address;
 
 fn setup(env: &Env) -> (Address, EmergencyKillswitchClient<'_>) {
     let contract_id = env.register_contract(None, EmergencyKillswitch);
@@ -70,6 +71,9 @@ fn transfer_admin_rejects_same_admin() {
     let (_, client) = setup(&env);
     let admin = Address::generate(&env);
     client.initialize(&admin);
+    // Confirm we are genuinely passing the same address, not two coincidentally
+    // equal values — using the shared helper keeps this intent grep-able.
+    assert!(same_address(&admin, &admin));
     assert_eq!(
         client.try_transfer_admin(&admin, &0),
         Err(Ok(Error::InvalidAdmin))
@@ -84,7 +88,10 @@ fn transfer_admin_succeeds_with_different_address() {
     let admin = Address::generate(&env);
     let new_admin = Address::generate(&env);
     client.initialize(&admin);
-    assert_eq!(client.try_transfer_admin(&new_admin, &0), Ok(Ok(())));
+    // Confirm the two addresses are genuinely distinct before testing the
+    // happy path — makes the boundary explicit and avoids false positives.
+    assert!(!same_address(&admin, &new_admin));
+    assert_eq!(client.try_transfer_admin(&new_admin), Ok(Ok(())));
 }
 
 #[test]

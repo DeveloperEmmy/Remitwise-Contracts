@@ -10,6 +10,7 @@
 #![allow(deprecated, clippy::all)]
 
 use soroban_sdk::{testutils::Address as _, Address, Env};
+use testutils::same_address;
 
 use crate::{ReportingContract, ReportingContractClient, ReportingError};
 
@@ -65,7 +66,7 @@ fn test_get_remittance_summary_requires_auth() {
 
     // Verify auth was recorded
     let auths = env.auths();
-    let found = auths.iter().any(|(addr, _)| *addr == user);
+    let found = auths.iter().any(|(addr, _)| same_address(addr, &user));
     assert!(
         found,
         "get_remittance_summary must enforce auth for the user"
@@ -175,7 +176,7 @@ fn test_authorization_enforcement_present() {
         client.get_remittance_summary(&user, &10_000i128, &1_704_067_200u64, &1_706_745_600u64);
 
     let auths = env.auths();
-    let found = auths.iter().any(|(addr, _)| *addr == user);
+    let found = auths.iter().any(|(addr, _)| same_address(addr, &user));
     assert!(found, "require_auth() must be called for user data access");
 }
 
@@ -232,7 +233,7 @@ fn test_sc_003_auth_enforcement() {
     let _ = client.get_remittance_summary(&user, &10_000i128, &1_704_067_200u64, &1_706_745_600u64);
 
     let auths = env.auths();
-    let found = auths.iter().any(|(addr, _)| *addr == user);
+    let found = auths.iter().any(|(addr, _)| same_address(addr, &user));
     assert!(
         found,
         "SC-003: All query endpoints must enforce require_auth()"
@@ -311,7 +312,7 @@ fn test_authorization_call_count() {
 
     // Auth must be recorded
     let auths = env.auths();
-    let found = auths.iter().any(|(addr, _)| *addr == user);
+    let found = auths.iter().any(|(addr, _)| same_address(addr, &user));
     assert!(found, "Auth enforcement must record calls");
 }
 
