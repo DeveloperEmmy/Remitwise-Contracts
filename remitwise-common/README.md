@@ -1,10 +1,14 @@
 # Remitwise Common Library
 
+**New in 2026.7:** Stable period bucketing for timestamps; use `PeriodKind` and `Timestamp::to_period_key` for reproducible calendar grouping (see below).
+
+
 Shared types, constants, and utilities used across all Remitwise Soroban smart contracts.
 
 ## Features
 
-- Shared types: Category, FamilyRole, CoverageType, SupportedToken, Percent, Rate
+- Shared types: Category, FamilyRole, CoverageType, SupportedToken, Percent, Rate, PeriodKind
+- Period bucketing: Timestamp::to_period_key (day/week/month)
 - Token registry: SupportedToken, stroop/decimal constants, currency helpers
 - Rate arithmetic & percent conversion: BPS_PER_PERCENT, Percent type, Rate::from_percent
 - Event taxonomy: EventCategory, EventPriority, RemitwiseEvents emitter
@@ -60,6 +64,10 @@ match canonicalize_tags_checked(&env, &tags) {
 ```
 
 ## Types
+
+### PeriodKind
+- Enum for selecting period bucket (`Day`, `Week`, `Month`).
+- Use with `Timestamp::to_period_key(ts, period)`.
 
 ### Category
 
@@ -118,6 +126,8 @@ See `docs/type-safe-percent-conversion.md` for complete documentation.
 - `BASIS_POINTS`: 10_000
 - `BPS_PER_PERCENT`: 100
 - `BASIS_POINTS_PER_PERCENT`: 100
+- `SECONDS_PER_DAY`: 86400
+- `SECONDS_PER_WEEK`: 604800
 
 ## Utilities
 
