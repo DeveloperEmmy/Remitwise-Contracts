@@ -15,13 +15,14 @@
 ///   "travel" both become "travel"), both copies appear in the output. Callers
 ///   that need uniqueness must deduplicate the result themselves.
 extern crate std;
+use std::string::ToString;
 
 use super::*;
 use crate::distribute_pro_rata;
 use ed25519_dalek::Signer;
 use proptest::prelude::*;
+use soroban_sdk::{Bytes, Env, IntoVal, String, Symbol, Vec};
 use soroban_sdk::testutils::{Ledger, LedgerInfo};
-use soroban_sdk::{String, Symbol, Vec};
 
 #[allow(dead_code)]
 fn set_ledger(env: &Env, sequence_number: u32) {
@@ -1556,24 +1557,70 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// require_no_pending_dispute_epoch tests
+// require_matching_ledger tests
 // ---------------------------------------------------------------------------
-#[test]
-fn test_require_no_pending_dispute_epoch_rejects_outdated() {
-    let env = Env::default();
-    env.mock_all_auths();
-    // Simulate setting the current pending dispute epoch to 5
-    env.storage().instance().set(&symbol_short!("DISP_EP"), &5u64);
-    
-    // Negative test: An outdated epoch (e.g. 3) must fail
-    let res = require_no_pending_dispute_epoch(&env, 3);
-    assert_eq!(res, Err(DisputeError::OutdatedEpoch));
-    
-    // Equal epoch (5) must pass
-    let res = require_no_pending_dispute_epoch(&env, 5);
-    assert_eq!(res, Ok(()));
 
-    // Future epoch (6) must pass
-    let res = require_no_pending_dispute_epoch(&env, 6);
-    assert_eq!(res, Ok(()));
+#[test]
+fn require_matching_ledger_returns_ok_when_ledger_matches() {
+    let env = Env::default();
+    set_ledger(&env, 100);
+    assert_eq!(require_matching_ledger(&env, 100), Ok(()));
+}
+
+#[test]
+fn require_matching_ledger_returns_err_when_current_is_higher() {
+    // Ascending: ledger has advanced past expected
+    let env = Env::default();
+    set_ledger(&env, 200);
+    assert_eq!(
+        require_matching_ledger(&env, 100),
+        Err(LedgerError::LedgerMismatch)
+    );
+}
+
+#[test]
+fn require_matching_ledger_returns_err_when_current_is_lower() {
+    // Descending: ledger is behind expected
+    let env = Env::default();
+    set_ledger(&env, 50);
+    assert_eq!(
+        require_matching_ledger(&env, 100),
+        Err(LedgerError::LedgerMismatch)
+    );
+}
+
+#[test]
+fn require_matching_ledger_works_at_boundaries() {
+    let env = Env::default();
+
+    set_ledger(&env, 0);
+    assert_eq!(require_matching_ledger(&env, 0), Ok(()));
+    assert_eq!(
+        require_matching_ledger(&env, 1),
+        Err(LedgerError::LedgerMismatch)
+    );
+
+    set_ledger(&env, u32::MAX);
+    assert_eq!(require_matching_ledger(&env, u32::MAX), Ok(()));
+    assert_eq!(
+        require_matching_ledger(&env, u32::MAX - 1),
+        Err(LedgerError::LedgerMismatch)
+    );
+}
+
+proptest! {
+    #[test]
+    fn proptest_require_matching_ledger(
+        expected in any::<u32>(),
+        current in any::<u32>(),
+    ) {
+        let env = Env::default();
+        set_ledger(&env, current);
+        let result = require_matching_ledger(&env, expected);
+        if expected == current {
+            prop_assert_eq!(result, Ok(()));
+        } else {
+            prop_assert_eq!(result, Err(LedgerError::LedgerMismatch));
+        }
+    }
 }

@@ -1,6 +1,6 @@
 use crate::{EventCategory, EventPriority, RemitwiseEvents};
+use soroban_sdk::{symbol_short, Env, Vec, FromVal};
 use soroban_sdk::testutils::Events;
-use soroban_sdk::{symbol_short, Env, FromVal, Vec};
 
 #[test]
 fn test_compact_event_passes() {
