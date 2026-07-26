@@ -355,7 +355,7 @@ To run an example, use `cargo run --example <example_name>`:
 - [Settler Whitelist](docs/SETTLER_WHITELIST.md) - Operator guide: how settlers are added, rotated, and revoked
 - [Epoch Model](docs/EPOCH_MODEL.md) - How epoch counters bump, what they invalidate, and the stale-authorization replay threat they mitigate in the emergency killswitch and orchestrator contracts
 - [Killswitch Trust Model](docs/killswitch-trust-model.md) - Who can trigger, who can clear, what state is preserved in the emergency killswitch
-- [Killswitch Epochs](docs/KILL_SWITCH_EPOCHS.md) - Defining emergency epochs and incident lifecycles
+- [Ledger Monotonicity](docs/LEDGER_MONOTONICITY.md) - Where and why contract code relies on ledger sequence and timestamp monotonicity
 - [Tagging Feature](TAGGING_FEATURE.md) - Tag-based organization system
 - [Threat Model](THREAT_MODEL.md) - Security analysis and mitigations
 - [Entrypoint Threat Breakdown](docs/THREAT_MODEL.md) - STRIDE-style threat analysis per contract entrypoint (contributor-focused)
