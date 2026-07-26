@@ -17,6 +17,7 @@ This workspace contains the core smart contracts that power RemitWise's post-rem
 - **[remitwise-common](remitwise-common/README.md)**: Shared types and utilities used across contracts
 - **[docs/PERIOD_INVARIANTS.md](docs/PERIOD_INVARIANTS.md)**: Time-bound period invariants, ledger timestamp rules, and execution windows
 - **[docs/AMOUNT_INVARIANTS.md](docs/AMOUNT_INVARIANTS.md)**: Amount zero-handling rules across contract entrypoints
+- **[docs/settlement-currency-whitelist.md](docs/settlement-currency-whitelist.md)**: Per-invoice settlement currency whitelist — mutation and guard flow
 
 ## Shared Components
 
@@ -38,7 +39,8 @@ A common crate containing shared types, enums, and constants used across multipl
 
 **Shared Utilities:**
 - `clamp_limit()`: Helper for pagination limit validation
-- `validate_period()`: Helper for checking logical ordering of start/end ranges
+- `verify_ordered_pair()`: Helper for range validation
+- `require_signed_by_admin()`: Helper for Ed25519 admin signature verification
 - `RemitwiseEvents`: Standardized event emission with `emit()` and `emit_batch()` methods
 
 ## Shared Enums & Constants Stability Coverage
@@ -285,6 +287,7 @@ If you encounter issues with a specific Soroban version:
 
 - **[UPGRADE_GUIDE.md](UPGRADE_GUIDE.md)** - Comprehensive upgrade procedures and version-specific migration guides
 - **[docs/UPGRADE_RUNBOOK.md](docs/UPGRADE_RUNBOOK.md)** - Step-by-step contract upgrade runbook and rollback plan for operators
+- **[docs/UPGRADE_TESTING.md](docs/UPGRADE_TESTING.md)** - Contributor procedure for loading a previous snapshot and verifying upgrade invariants
 - **[docs/SETTLEMENT_WINDOWS.md](docs/SETTLEMENT_WINDOWS.md)** - Specification of invoice settlement window rules, creation acceptance bounds, overdue semantics, and late catch-up loops
 - **[docs/SETTLEMENT_CURRENCY_POLICY.md](docs/SETTLEMENT_CURRENCY_POLICY.md)** - How settlement currencies are chosen, validated, and enforced across contracts
 - **[VERSION_COMPATIBILITY.md](VERSION_COMPATIBILITY.md)** - Detailed compatibility matrix and testing status
@@ -323,6 +326,7 @@ To run an example, use `cargo run --example <example_name>`:
 ## Documentation
 
 - [Contributor Overview](docs/CONTRIBUTOR_OVERVIEW.md) - Onboarding guide for new contributors
+- [Contract Semantics](docs/CONTRACT_SEMANTICS.md) - Behavioral invariants every contract must respect to interoperate correctly
 - [ADR: Ban unwrap in Release Builds](docs/adr-ban-unwrap-in-release.md) - Why unwrap and panic are forbidden in production contract code
 - [Changelog](CHANGELOG.md) - Conventional-commits-style log of every release
 - [Token Decimal Catalogue](docs/DECIMAL_CATALOGUE.md) - Reference table of decimals expected for each canonical token
@@ -331,26 +335,33 @@ To run an example, use `cargo run --example <example_name>`:
 - [Pause Playbook](docs/PAUSE_PLAYBOOK.md) - Emergency pause mechanisms and recovery procedures for operators
 - [Committed Hashes](docs/COMMITTED_HASHES.md) - Request-hash coverage and verification guidance for downstream integrators
 - [Zero-Amount Policy](docs/ZERO_AMOUNT_POLICY.md) - Which entrypoints reject, accept, or normalize zero amounts; quick reference for integrators
+- [Entrypoint N Caps](docs/ENTRYPOINT_N_CAPS.md) - Per-entrypoint record-count upper bounds (N caps), error codes, slot-release rules, and reviewer checklist
 - [Family Wallet Design (as implemented)](docs/family-wallet-design.md)
 - [Reporting Admin Rotation](docs/reporting-admin-rotation.md) - Two-step upgrade-admin handoff procedure for reporting dependency configuration
 - [Event Indexing Guide](docs/INDEXING.md) - Mapping contract events to off-chain tables
 - [Financial Health Score Model](docs/HEALTH_SCORE.md) - HealthScore component weights, inputs, clamping, and worked examples
+- [Model Overview](docs/MODEL.md) - Overview of the financial health score model
 - [Frontend Integration Notes](docs/frontend-integration.md)
 - [String and Bytes Canonicalisation](docs/CANONICALISATION.md) - Tag casefold, currency trim/uppercase, external-ref charset, and migration checksum byte-order
 - [Type-Safe Percent Conversion](docs/type-safe-percent-conversion.md) - Converting whole percentages to basis points with checked overflow arithmetic
+- [Gas Unit Costs Reference](docs/GAS_UNIT_COSTS.md) - Per-instruction CPU/memory/ledger-I/O costs, network limits, and per-contract benchmark table
 - [Storage Layout Reference](STORAGE_LAYOUT.md)
+- [Reserved Storage Keys](docs/RESERVED_STORAGE_KEYS.md) - Storage keys reserved for roadmap features to prevent collisions (contributor guide)
 - [Contract Specs & Migrations](docs/MIGRATIONS.md) - How to bump a contract spec without breaking existing storage
 - [Event Indexer](indexer/README.md) - Off-chain event indexing and querying
 - [Audit Trail](docs/AUDIT_TRAIL.md) - How to reconstruct historical state from events alone
 - [Settler Whitelist](docs/SETTLER_WHITELIST.md) - Operator guide: how settlers are added, rotated, and revoked
-- [Settlement Currency Policy](docs/SETTLEMENT_CURRENCY_POLICY.md) - How settlement currencies are chosen, validated, and enforced across contracts
+- [Epoch Model](docs/EPOCH_MODEL.md) - How epoch counters bump, what they invalidate, and the stale-authorization replay threat they mitigate in the emergency killswitch and orchestrator contracts
 - [Killswitch Trust Model](docs/killswitch-trust-model.md) - Who can trigger, who can clear, what state is preserved in the emergency killswitch
+- [Killswitch Epochs](docs/KILL_SWITCH_EPOCHS.md) - Defining emergency epochs and incident lifecycles
 - [Tagging Feature](TAGGING_FEATURE.md) - Tag-based organization system
 - [Threat Model](THREAT_MODEL.md) - Security analysis and mitigations
 - [Entrypoint Threat Breakdown](docs/THREAT_MODEL.md) - STRIDE-style threat analysis per contract entrypoint (contributor-focused)
 - [Security Review Summary](SECURITY_REVIEW_SUMMARY.md)
 - [Event Versioning ADR](docs/events-versioning.md) - Why contract events are versioned via a `_v2` suffix
 - [Event Versioning Discipline](docs/EVENT_VERSIONING.md) - Backward-compatibility rules, migration steps, and indexer guidelines for event schema changes
+- [Cross-Contract Epochs](docs/CROSS_CONTRACT_EPOCHS.md) - Actor-epoch semantics, the cross-contract coordination protocol, and the `EpochMismatch` guard
+- [Observability Model](docs/OBSERVABILITY_MODEL.md) - Per-contract event catalogue: what each contract emits and what off-chain consumers rely on
 
 ## Contracts
 
@@ -663,6 +674,7 @@ After verifying optimizations:
 ### Documentation
 
 - **[Benchmarking Guide](benchmarks/README.md)**: Complete benchmarking documentation
+- **[Gas Unit Costs Reference](docs/GAS_UNIT_COSTS.md)**: Per-operation CPU/memory costs, fee formulas, and current network parameters
 - **[Gas Tuning Guide](docs/GAS_TUNING.md)**: How to interpret gas snapshots and optimize costs
 - **[Gas Optimization Guide](docs/gas-optimization.md)**: Optimization strategies and best practices
 - **[Baseline Results](benchmarks/baseline.json)**: Current performance baseline

@@ -128,6 +128,13 @@ Normalizes pagination limits:
 - 1..=MAX_PAGE_LIMIT → unchanged
 - > MAX_PAGE_LIMIT → MAX_PAGE_LIMIT
 
+### `require_matching_settlement_currency_with_config(inv, sym, config)`
+
+Validates settlement currencies against the invoice whitelist while enforcing a configurable cap:
+- The default config allows up to 10 currencies.
+- Oversized whitelists return `SettlementCurrencyError::WhitelistTooLarge`.
+- A matching currency still succeeds when the whitelist stays within the configured cap.
+
 ### `Timestamp::seconds_until(now, target)`
 
 Computes the future distance to `target` with saturating semantics:
