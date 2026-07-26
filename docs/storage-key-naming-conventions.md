@@ -221,6 +221,7 @@ const KEY_rate_lim: Symbol = symbol_short!("rate_lim");  // lowercase - wrong fo
 ## References
 
 - [STORAGE_LAYOUT.md](../STORAGE_LAYOUT.md) - Complete storage layout documentation
+- [RESERVED_STORAGE_KEYS.md](RESERVED_STORAGE_KEYS.md) - Keys reserved for future roadmap features
 - [Soroban Storage Documentation](https://developers.stellar.org/docs/build/smart-contracts/example-contracts/storage)
 - [Soroban Symbol Documentation](https://docs.rs/soroban-sdk/latest/soroban_sdk/struct.Symbol.html)
 

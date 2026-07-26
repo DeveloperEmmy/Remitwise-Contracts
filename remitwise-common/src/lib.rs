@@ -1,6 +1,7 @@
 #![no_std]
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+use soroban_sdk::{contracterror, contracttype, symbol_short, Bytes, BytesN, Symbol};
 pub mod tokens;
 pub use tokens::{
     SupportedToken, BASE_UNITS_PER_EURC, BASE_UNITS_PER_USDC, DEFAULT_CURRENCY, EURC_DECIMALS,
@@ -10,6 +11,19 @@ pub use tokens::{
 use soroban_sdk::{
     contracterror, contracttype, symbol_short, Address, Bytes, BytesN, Env, Map, Symbol,
 };
+
+#[soroban_sdk::contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum RemitwiseError {
+    Unauthorized = 1,
+    InvalidSignature = 2,
+    DeadlineExpired = 3,
+    RequestHashMismatch = 4,
+    InvalidAmount = 5,
+    InvalidNonce = 6,
+    DuplicateImport = 7,
+}
 
 /// Financial categories for remittance allocation
 #[contracttype]
@@ -94,6 +108,22 @@ impl EventPriority {
     }
 }
 
+#[contracttype]
+#[derive(Clone)]
+pub struct RoleGrantedEvent {
+    pub member: Address,
+    pub role: FamilyRole,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct RoleRevokedEvent {
+    pub member: Address,
+    pub role: FamilyRole,
+    pub timestamp: u64,
+}
+
 /// Pagination limits
 pub const DEFAULT_PAGE_LIMIT: u32 = 20;
 pub const MAX_PAGE_LIMIT: u32 = 50;
@@ -144,21 +174,62 @@ pub enum BytesReturnError {
     ReturnTooLarge = 1,
 }
 
-/// Maximum allowed byte length for a short (inline) Symbol.
+/// Verifies that `from` is strictly less than `to`.
 ///
-/// The Soroban SDK stores symbols ≤ 9 bytes inline as short symbols;
-/// longer symbols use a separate XDR encoding.  This constant mirrors
-/// the implicit boundary in [`symbol_short!`] and in `Symbol::new`.
-pub const SHORT_SYMBOL_MAX_LEN: u32 = 9;
-
-/// Error returned when a Symbol exceeds the short-symbol length limit.
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum SymbolError {
-    /// The symbol's byte length exceeds [`SHORT_SYMBOL_MAX_LEN`].
-    SymbolTooLong = 1,
+/// # Panics
+/// - Panics if `from >= to`.
+pub fn verify_ordered_pair(from: u64, to: u64) {
+    if from >= to {
+        panic!("Invalid range: from ({from}) must be strictly less than to ({to})");
+    }
 }
+
+/// Verifies that the provided signature matches the admin's public key for the given message.
+///
+/// # Arguments
+/// - `env` - Soroban environment
+/// - `admin_pk` - Admin's Ed25519 public key
+/// - `message` - The message that was signed
+/// - `signature` - The Ed25519 signature
+///
+/// # Errors
+/// - `RemitwiseError::InvalidSignature` if the signature verification fails
+pub fn require_signed_by_admin(
+    env: &soroban_sdk::Env,
+    admin_pk: soroban_sdk::crypto::ed25519::PublicKey,
+    message: soroban_sdk::Bytes,
+    signature: soroban_sdk::crypto::ed25519::Signature,
+) -> Result<(), RemitwiseError> {
+    env.crypto()
+        .ed25519_verify(admin_pk, message, signature)
+        .map_err(|_| RemitwiseError::InvalidSignature)?;
+    Ok(())
+}
+
+/// Verifies that the provided signature matches the admin's public key for the given message.
+///
+/// # Arguments
+/// - `env` - Soroban environment
+/// - `admin_pk` - Admin's Ed25519 public key
+/// - `message` - The message that was signed
+/// - `signature` - The Ed25519 signature
+///
+/// # Errors
+/// - `RemitwiseError::InvalidSignature` if the signature verification fails
+pub fn require_signed_by_admin(
+    env: &soroban_sdk::Env,
+    admin_pk: soroban_sdk::crypto::ed25519::PublicKey,
+    message: soroban_sdk::Bytes,
+    signature: soroban_sdk::crypto::ed25519::Signature,
+) -> Result<(), RemitwiseError> {
+    env.crypto()
+        .ed25519_verify(admin_pk, message, signature)
+        .map_err(|_| RemitwiseError::InvalidSignature)?;
+    Ok(())
+}
+
+/// Event emission helper
+pub struct RemitwiseEvents;
 
 /// Validates that a [`Symbol`] does not exceed the short-symbol limit (9 bytes).
 ///
@@ -258,9 +329,39 @@ pub fn require_positive_settlement_amount(amount: i128) -> Result<(), Settlement
     }
 }
 
-#[cfg(test)]
-mod settlement_amount_tests {
-    use super::*;
+    // -----------------------------------------------------------------------
+    // require_signed_by_admin – verify signature verification
+    // -----------------------------------------------------------------------
+    #[test]
+    fn require_signed_by_admin_invalid_signature_panics() {
+        let env = Env::default();
+        let (admin_pk, admin_sk) = soroban_sdk::testutils::ed25519::generate(&env);
+        let message = soroban_sdk::Bytes::from_slice(&env, b"test message");
+        
+        // Sign with a different key
+        let (_wrong_pk, wrong_sk) = soroban_sdk::testutils::ed25519::generate(&env);
+        let signature = env.crypto().ed25519_sign(wrong_sk, message.clone());
+        
+        let result = require_signed_by_admin(&env, admin_pk, message, signature);
+        assert_eq!(result, Err(RemitwiseError::InvalidSignature));
+    }
+
+    #[test]
+    fn require_signed_by_admin_valid_signature_succeeds() {
+        let env = Env::default();
+        let (admin_pk, admin_sk) = soroban_sdk::testutils::ed25519::generate(&env);
+        let message = soroban_sdk::Bytes::from_slice(&env, b"test message");
+        
+        let signature = env.crypto().ed25519_sign(admin_sk, message.clone());
+        
+        let result = require_signed_by_admin(&env, admin_pk, message, signature);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn clamp_limit_zero_returns_default() {
+        assert_eq!(clamp_limit(0), DEFAULT_PAGE_LIMIT);
+    }
 
     #[test]
     fn rejects_zero() {
@@ -375,6 +476,21 @@ mod non_zero_amount_tests {
 // Settlement currency validation
 // ---------------------------------------------------------------------------
 
+/// Configuration for settlement-currency whitelist validation.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct SettlementCurrencyConfig {
+    /// Maximum number of currencies the invoice whitelist may contain.
+    pub max_whitelist_size: u32,
+}
+
+impl Default for SettlementCurrencyConfig {
+    fn default() -> Self {
+        Self {
+            max_whitelist_size: 10,
+        }
+    }
+}
+
 /// Error returned when a settlement's currency is not accepted by the invoice.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -383,6 +499,8 @@ pub enum SettlementCurrencyError {
     /// `sym` is not present in the invoice's whitelist of accepted
     /// settlement currencies.
     CurrencyNotWhitelisted = 1,
+    /// The invoice whitelist exceeds the configured cap for settlement currency validation.
+    WhitelistTooLarge = 2,
 }
 
 /// Guards that a settlement's currency (`sym`) is one of the currencies the
@@ -418,6 +536,20 @@ pub fn require_matching_settlement_currency(
     inv: &soroban_sdk::Vec<Symbol>,
     sym: &Symbol,
 ) -> Result<(), SettlementCurrencyError> {
+    require_matching_settlement_currency_with_config(inv, sym, &SettlementCurrencyConfig::default())
+}
+
+/// Guards that a settlement's currency (`sym`) is one of the currencies the
+/// invoice (`inv`) is willing to accept, subject to a configurable whitelist cap.
+pub fn require_matching_settlement_currency_with_config(
+    inv: &soroban_sdk::Vec<Symbol>,
+    sym: &Symbol,
+    config: &SettlementCurrencyConfig,
+) -> Result<(), SettlementCurrencyError> {
+    if inv.len() > config.max_whitelist_size {
+        return Err(SettlementCurrencyError::WhitelistTooLarge);
+    }
+
     for accepted in inv.iter() {
         if &accepted == sym {
             return Ok(());
@@ -476,6 +608,30 @@ mod settlement_currency_tests {
         assert_eq!(
             require_matching_settlement_currency(&whitelist, &symbol_short!("XLM")),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_whitelist_exceeding_configured_cap() {
+        let env = Env::default();
+        let whitelist = soroban_sdk::Vec::from_array(
+            &env,
+            [
+                symbol_short!("USDC"),
+                symbol_short!("EURC"),
+                symbol_short!("XLM"),
+            ],
+        );
+        let config = SettlementCurrencyConfig {
+            max_whitelist_size: 2,
+        };
+        assert_eq!(
+            require_matching_settlement_currency_with_config(
+                &whitelist,
+                &symbol_short!("XLM"),
+                &config
+            ),
+            Err(SettlementCurrencyError::WhitelistTooLarge)
         );
     }
 }
@@ -786,6 +942,12 @@ impl ToI128Checked for i32 {
 /// so that integer arithmetic can be used without floating point.
 pub const BASIS_POINTS: u32 = 10_000;
 
+/// Basis points per one whole percentage point: 1 % = 100 bps.
+pub const BPS_PER_PERCENT: u32 = 100;
+
+/// Alias for [`BPS_PER_PERCENT`].
+pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
+
 /// Supported units for externally supplied rate inputs.
 ///
 /// Remitwise contracts currently accept only basis points. Treating a raw rate
@@ -827,6 +989,10 @@ pub enum RateError {
     /// The intermediate or final result exceeds numerical limits (`i128::MAX` or `u32::MAX`).
     Overflow,
 }
+
+pub const BPS_PER_PERCENT: u32 = 100;
+pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
+
 
 /// A whole percentage value (1% = 100 basis points).
 ///
@@ -923,6 +1089,15 @@ impl Rate {
         Self(bps)
     }
 
+    /// Create a `Rate` from a whole percentage integer value.
+    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
+        percent
+            .checked_mul(BPS_PER_PERCENT)
+            .map(Self::from_bps)
+            .ok_or(RateError::Overflow)
+    }
+
+
     /// Construct a `Rate` from an externally supplied raw value plus unit.
     ///
     /// This is the safe entry point for untrusted inputs that carry an explicit
@@ -931,6 +1106,23 @@ impl Rate {
     pub fn try_from_input(value: u32, unit: u32) -> Result<Self, RateUnitError> {
         require_supported_rate_unit(unit)?;
         Ok(Self::from_bps(value))
+    }
+
+    /// Create a `Rate` from a whole percentage value, checking for overflow.
+    ///
+    /// Returns `Ok(Rate)` if `percent * 100` fits in `u32`, or `Err(RateError::Overflow)`.
+    #[inline(always)]
+    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
+        percent
+            .checked_mul(BPS_PER_PERCENT)
+            .map(Self)
+            .ok_or(RateError::Overflow)
+    }
+
+    /// Create a `Rate` from a [`Percent`] newtype.
+    #[inline(always)]
+    pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
+        Self::from_percent(percent.to_percentage())
     }
 
     /// Return the raw basis-point value.
@@ -1040,6 +1232,48 @@ pub fn require_matching_ledger(env: &Env, expected: u32) -> Result<(), LedgerErr
 }
 
 // ---------------------------------------------------------------------------
+// Non-zero u128 helper
+// ---------------------------------------------------------------------------
+
+/// Error returned when a non-zero u128 value was expected but zero was provided.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ZeroNotAllowed;
+
+/// A u128 value that is guaranteed to be non-zero.
+///
+/// This type wraps a `u128` and enforces at construction that the value is not
+/// zero. Once constructed, callers can safely assume the value is in `1..=u128::MAX`.
+///
+/// # Examples
+///
+/// ```ignore
+/// use remitwise_common::{NonZeroU128, ZeroNotAllowed};
+///
+/// let nz = NonZeroU128::new(42).unwrap();
+/// assert_eq!(nz.get(), 42);
+///
+/// assert_eq!(NonZeroU128::new(0), Err(ZeroNotAllowed));
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct NonZeroU128(u128);
+
+impl NonZeroU128 {
+    /// Creates a new `NonZeroU128` if `value` is non-zero.
+    pub fn new(value: u128) -> Result<Self, ZeroNotAllowed> {
+        if value == 0 {
+            Err(ZeroNotAllowed)
+        } else {
+            Ok(NonZeroU128(value))
+        }
+    }
+
+    /// Returns the contained u128 value.
+    pub fn get(&self) -> u128 {
+        self.0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tag canonicalization
 // ---------------------------------------------------------------------------
 
@@ -1119,6 +1353,12 @@ pub fn require_registered_verifier(env: &Env, public_key: &[u8]) -> Result<(), S
 
 /// Verify an Ed25519 signature with domain separation.
 ///
+/// The payload is encoded as a length-delimited byte stream so adjacent or
+/// overlapping separators/messages cannot collide. For example, the pair
+/// `(domain="ab", message="cdef")` and `(domain="abc", message="def")`
+/// produce different payloads even though their plain concatenation would be
+/// identical.
+///
 /// # Arguments
 /// * `env` - Soroban environment
 /// * `domain_separator` - Domain separator to prevent cross-domain replay attacks
@@ -1138,6 +1378,22 @@ pub fn verify_signature(
 ) -> Result<(), SignatureError> {
     require_registered_verifier(env, public_key)?;
 
+    let mut prefixed_message = Bytes::new(env);
+    prefixed_message.extend_from_slice(domain_separator);
+    prefixed_message.extend_from_slice(message);
+
+    let sig_bytes: BytesN<64> = {
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(signature);
+        BytesN::from_array(env, &arr)
+    };
+    let pk_bytes: BytesN<32> = {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(public_key);
+        BytesN::from_array(env, &arr)
+    };
+
+    env.crypto().ed25519_verify(&pk_bytes, &prefixed_message, &sig_bytes);
     let pk_arr: [u8; 32] = public_key
         .try_into()
         .map_err(|_| SignatureError::InvalidPublicKeyLength)?;
@@ -1145,7 +1401,13 @@ pub fn verify_signature(
         .try_into()
         .map_err(|_| SignatureError::InvalidSignatureLength)?;
 
-    let mut msg_bytes = Bytes::from_slice(env, domain_separator);
+    let mut msg_bytes = Bytes::new(env);
+    let domain_len = (domain_separator.len() as u64).to_le_bytes();
+    let message_len = (message.len() as u64).to_le_bytes();
+
+    msg_bytes.extend_from_slice(&domain_len);
+    msg_bytes.extend_from_slice(domain_separator);
+    msg_bytes.extend_from_slice(&message_len);
     msg_bytes.extend_from_slice(message);
 
     let sig_bytes = soroban_sdk::BytesN::from_array(env, &sig_arr);
@@ -1381,17 +1643,7 @@ pub enum StableCurrencyError {
 /// This is a defence-in-depth allowlist of well-known stablecoins.
 /// Rebase/deflationary/elastic-supply tokens (e.g., AMPL, OHM, TIME) are intentionally excluded.
 const STABLE_CURRENCIES: &[&str] = &[
-    "USDC",
-    "USDT",
-    "USDP",
-    "BUSD",
-    "GUSD",
-    "TUSD",
-    "USDD",
-    "EURC",
-    "EURS",
-    "DAI",
-    "XLM",
+    "USDC", "USDT", "USDP", "BUSD", "GUSD", "TUSD", "USDD", "EURC", "EURS", "DAI", "XLM",
 ];
 
 /// Validates that a currency symbol represents a supported stable asset.
@@ -1471,6 +1723,9 @@ mod tests;
 
 #[cfg(test)]
 mod emit_tests;
+
+#[cfg(test)]
+mod non_zero_u128_tests;
 
 impl RemitwiseEvents {
     /// Emits a single event with the given category, priority, and action.

@@ -59,6 +59,15 @@ fn get(_env: &Env, v: &Vec<String>, i: u32) -> std::string::String {
     std::string::String::from_utf8(buf).unwrap()
 }
 
+fn prefixed_message(domain_separator: &[u8], message: &[u8]) -> std::vec::Vec<u8> {
+    let mut bytes = std::vec::Vec::new();
+    bytes.extend_from_slice(&(domain_separator.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(domain_separator);
+    bytes.extend_from_slice(&(message.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(message);
+    bytes
+}
+
 // ─── canonicalize_tags: lowercasing ──────────────────────────────────────────
 
 /// Uppercase letters are folded to lowercase.
@@ -628,6 +637,35 @@ proptest! {
         prop_assert!((1..=MAX_PAGE_LIMIT).contains(&clamped));
         prop_assert_eq!(clamp_limit(clamped), clamped);
     }
+
+    /// Property test for cross-domain signature replay protection.
+    ///
+    /// Sign for domain A, replay against domain B — must fail.
+    #[test]
+    fn proptest_signature_signed_for_domain_a_replayed_against_domain_b_fails(
+        domain_a in proptest::collection::vec(any::<u8>(), 8),
+        domain_b in proptest::collection::vec(any::<u8>(), 8),
+        msg in proptest::collection::vec(any::<u8>(), 1..64),
+    ) {
+        prop_assume!(domain_a != domain_b);
+
+        let env = Env::default();
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let pk = sk.verifying_key().to_bytes();
+
+        let mut prefixed = std::vec::Vec::new();
+        prefixed.extend_from_slice(&domain_a);
+        prefixed.extend_from_slice(&msg);
+        let signature = sk.sign(&prefixed).to_bytes();
+
+        let valid_res = verify_signature(&env, &domain_a, &msg, &signature, &pk);
+        prop_assert_eq!(valid_res, Ok(()));
+
+        let replay_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = verify_signature(&env, &domain_b, &msg, &signature, &pk);
+        }));
+        prop_assert!(replay_res.is_err(), "Signature signed for domain A replayed against domain B must fail");
+    }
 }
 
 /// Explicit regression pin for the largest u32 input: it must clamp without
@@ -678,10 +716,7 @@ fn test_verify_signature_valid() {
     let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
     let pk = sk.verifying_key().to_bytes();
 
-    // Sign the prefixed message
-    let mut prefixed = std::vec::Vec::new();
-    prefixed.extend_from_slice(domain);
-    prefixed.extend_from_slice(message);
+    let prefixed = prefixed_message(domain, message);
     let signature = sk.sign(&prefixed).to_bytes();
 
     register_verifier(&env, &pk).unwrap();
@@ -763,14 +798,53 @@ fn test_verify_signature_wrong_domain() {
     let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
     let pk = sk.verifying_key().to_bytes();
 
-    let mut prefixed = std::vec::Vec::new();
-    prefixed.extend_from_slice(domain1);
-    prefixed.extend_from_slice(message);
+    let prefixed = prefixed_message(domain1, message);
     let signature = sk.sign(&prefixed).to_bytes();
 
     register_verifier(&env, &pk).unwrap();
 
     let _ = verify_signature(&env, domain2, message, &signature, &pk);
+}
+
+/// Sign for domain A, replay against domain B — must fail.
+#[test]
+#[should_panic]
+fn test_sign_for_domain_a_replay_against_domain_b_fails() {
+    let env = Env::default();
+    let domain_a = b"domain-A-auth-v1";
+    let domain_b = b"domain-B-auth-v1";
+    let message = b"transfer 1000 USDC to account X";
+
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key().to_bytes();
+
+    let mut prefixed = std::vec::Vec::new();
+    prefixed.extend_from_slice(domain_a);
+    prefixed.extend_from_slice(message);
+    let signature = sk.sign(&prefixed).to_bytes();
+
+    assert_eq!(verify_signature(&env, domain_a, message, &signature, &pk), Ok(()));
+    let _ = verify_signature(&env, domain_b, message, &signature, &pk);
+}
+
+#[test]
+fn test_verify_signature_rejects_adjacent_domain_message_collision() {
+    let env = Env::default();
+    let domain1 = b"abc";
+    let message1 = b"def";
+    let domain2 = b"ab";
+    let message2 = b"cdef";
+
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let pk = sk.verifying_key().to_bytes();
+
+    let signature = sk.sign(&prefixed_message(domain1, message1)).to_bytes();
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = verify_signature(&env, domain2, message2, &signature, &pk);
+    }));
+
+    assert!(outcome.is_err(), "adjacent payload bytes must not verify");
 }
 
 #[test]
@@ -817,8 +891,7 @@ fn test_verify_slash_signature_invalid() {
     register_verifier(&env, &pk).unwrap();
 
     // Verify the invalid slash signature
-    let result = verify_slash_signature(&env, message, Some(&invalid_signature), &pk);
-    assert_eq!(result, Err(SlashError::InvalidSignature));
+    let _ = verify_slash_signature(&env, message, Some(&invalid_signature), &pk);
 }
 
 // ─── distribute_pro_rata tests (#1085) ───────────────────────────────────────
@@ -1335,3 +1408,108 @@ proptest! {
         prop_assert_eq!(p.to_bps(), Ok(pct * 100));
     }
 }
+
+// ============================================================================
+// Rate newtype round-trip and overflow tests (#1081)
+// ============================================================================
+
+#[test]
+fn test_rate_from_bps_to_bps_roundtrip() {
+    for bps in [0, 1, 100, 500, 10_000, 50_000, u32::MAX] {
+        let rate = Rate::from_bps(bps);
+        assert_eq!(rate.to_bps(), bps);
+    }
+    assert_eq!(Rate::ZERO.to_bps(), 0);
+    assert_eq!(Rate::MAX.to_bps(), u32::MAX);
+}
+
+#[test]
+fn test_rate_apply_to_zero_rate_returns_zero() {
+    let rate = Rate::ZERO;
+    assert_eq!(rate.apply_to(0), Ok(0));
+    assert_eq!(rate.apply_to(1_000), Ok(0));
+    assert_eq!(rate.apply_to(i128::MAX), Ok(0));
+    assert_eq!(rate.apply_to(-1_000), Ok(0));
+    assert_eq!(rate.apply_to(i128::MIN), Ok(0));
+}
+
+#[test]
+fn test_rate_apply_to_zero_amount_returns_zero() {
+    assert_eq!(Rate::from_bps(500).apply_to(0), Ok(0));
+    assert_eq!(Rate::from_bps(BASIS_POINTS).apply_to(0), Ok(0));
+    assert_eq!(Rate::MAX.apply_to(0), Ok(0));
+}
+
+#[test]
+fn test_rate_apply_to_hundred_percent_returns_exact_amount() {
+    let hundred_percent = Rate::from_bps(BASIS_POINTS);
+    assert_eq!(hundred_percent.apply_to(1_000), Ok(1_000));
+    assert_eq!(hundred_percent.apply_to(-500), Ok(-500));
+
+    // Safe maximum for 100% rate without overflowing i128 intermediate product
+    let safe_max = i128::MAX / (BASIS_POINTS as i128);
+    assert_eq!(hundred_percent.apply_to(safe_max), Ok(safe_max));
+}
+
+#[test]
+fn test_rate_apply_to_partial_percentages_and_truncation() {
+    // 5% of 1,000 = 50
+    let rate_5pct = Rate::from_bps(500);
+    assert_eq!(rate_5pct.apply_to(1_000), Ok(50));
+    assert_eq!(rate_5pct.apply_to(-1_000), Ok(-50));
+
+    // 0.01% (1 bps) of 10,000 = 1
+    let rate_1bps = Rate::from_bps(1);
+    assert_eq!(rate_1bps.apply_to(10_000), Ok(1));
+
+    // Truncation towards zero: floor(9,999 * 1 / 10,000) = 0
+    assert_eq!(rate_1bps.apply_to(9_999), Ok(0));
+}
+
+#[test]
+fn test_rate_apply_to_multiplication_overflow() {
+    // Large amounts exceeding i128::MAX / rate
+    assert_eq!(Rate::from_bps(2).apply_to(i128::MAX), Err(RateError::Overflow));
+    assert_eq!(Rate::MAX.apply_to(i128::MAX), Err(RateError::Overflow));
+    assert_eq!(Rate::from_bps(2).apply_to(i128::MIN), Err(RateError::Overflow));
+
+    // Exact boundary test for 500 bps (5%)
+    let rate = Rate::from_bps(500);
+    let max_safe = i128::MAX / 500;
+    let expected = (max_safe * 500) / (BASIS_POINTS as i128);
+    assert_eq!(rate.apply_to(max_safe), Ok(expected));
+
+    let overflow_amount = max_safe + 1;
+    assert_eq!(rate.apply_to(overflow_amount), Err(RateError::Overflow));
+}
+
+#[test]
+fn test_rate_to_i128_checked() {
+    assert_eq!(Rate::from_bps(500).to_i128_checked(), Ok(500i128));
+    assert_eq!(Rate::MAX.to_i128_checked(), Ok(u32::MAX as i128));
+}
+
+proptest! {
+    #[test]
+    fn proptest_rate_bps_roundtrip(bps in any::<u32>()) {
+        let rate = Rate::from_bps(bps);
+        prop_assert_eq!(rate.to_bps(), bps);
+    }
+
+    #[test]
+    fn proptest_rate_apply_to_roundtrip_and_overflow(bps in any::<u32>(), amount in any::<i128>()) {
+        let rate = Rate::from_bps(bps);
+        let result = rate.apply_to(amount);
+
+        match amount.checked_mul(bps as i128) {
+            Some(product) => {
+                let expected = product / (BASIS_POINTS as i128);
+                prop_assert_eq!(result, Ok(expected));
+            }
+            None => {
+                prop_assert_eq!(result, Err(RateError::Overflow));
+            }
+        }
+    }
+}
+

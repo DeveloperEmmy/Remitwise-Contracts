@@ -4313,4 +4313,240 @@ mod tests {
         assert_eq!(first.payload, second.payload);
         assert_eq!(first.header.checksum, second.header.checksum);
     }
+
+    // =========================================================================
+    // Issue #1282 — Migration-completed helper: Completed / InProgress / None
+    //
+    // The `MigrationTracker::is_imported` helper is the canonical
+    // "migration-completed" predicate. It maps to three observable states:
+    //
+    // * **None** (tracker is fresh — no snapshots have ever been presented to
+    //   it): `is_imported` returns `false`; `mark_imported` transitions to
+    //   Completed on first call.
+    //
+    // * **InProgress** (a snapshot has been built and is about to be imported,
+    //   but `mark_imported` has not yet been called for it): `is_imported`
+    //   returns `false` even though the tracker has recorded *other* payloads.
+    //
+    // * **Completed** (the snapshot has been successfully fed through
+    //   `mark_imported` without error): `is_imported` returns `true`.
+    //
+    // Each test below is named assertively after the invariant it locks in, and
+    // is fully deterministic (no randomness, no external I/O).
+    // =========================================================================
+
+    /// A fresh `MigrationTracker` (None state) reports every snapshot as
+    /// not-imported because nothing has been recorded yet.
+    #[test]
+    fn migration_completed_none_state_reports_not_imported() {
+        let snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
+        let tracker = MigrationTracker::new();
+
+        // A brand-new tracker has no history — any snapshot must read as
+        // not-yet-imported regardless of its payload type or checksum.
+        assert!(
+            !tracker.is_imported(&snapshot),
+            "a fresh tracker must return false for any snapshot"
+        );
+    }
+
+    /// A fresh tracker serialised via `Default` is semantically equivalent to
+    /// one produced by `new()`.
+    #[test]
+    fn migration_completed_default_tracker_equals_new() {
+        let snapshot = ExportSnapshot::new(sample_savings_payload(), ExportFormat::Json);
+        let tracker_new = MigrationTracker::new();
+        let tracker_default = MigrationTracker::default();
+
+        assert_eq!(
+            tracker_new.is_imported(&snapshot),
+            tracker_default.is_imported(&snapshot),
+            "MigrationTracker::new() and Default must agree on every query"
+        );
+    }
+
+    /// Once `mark_imported` succeeds the tracker transitions to the Completed
+    /// state and `is_imported` returns `true` for that exact snapshot.
+    #[test]
+    fn migration_completed_completed_state_returns_true_after_mark() {
+        let snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
+        let mut tracker = MigrationTracker::new();
+
+        // Pre-condition: not yet completed.
+        assert!(!tracker.is_imported(&snapshot));
+
+        // Transition to Completed.
+        tracker.mark_imported(&snapshot, 1_000).unwrap();
+
+        // Post-condition: completed.
+        assert!(
+            tracker.is_imported(&snapshot),
+            "is_imported must return true after a successful mark_imported"
+        );
+    }
+
+    /// After a full tracked round-trip (`import_from_json`) the snapshot is in
+    /// Completed state — `is_imported` returns `true` for both the original
+    /// handle and the deserialized copy.
+    #[test]
+    fn migration_completed_completed_state_after_full_tracked_import() {
+        let snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
+        let bytes = export_to_json(&snapshot).unwrap();
+        let mut tracker = MigrationTracker::new();
+
+        let loaded = import_from_json(&bytes, &mut tracker, 42_000).unwrap();
+
+        assert!(
+            tracker.is_imported(&snapshot),
+            "original snapshot handle must read as completed"
+        );
+        assert!(
+            tracker.is_imported(&loaded),
+            "deserialized snapshot must read as completed (identity is checksum+version)"
+        );
+    }
+
+    /// The InProgress state: a snapshot exists in memory and is about to be
+    /// imported, but the tracker has not yet recorded it.  `is_imported` must
+    /// return `false` even when the tracker already holds entries for *other*
+    /// payloads — completion is per-identity, not global.
+    #[test]
+    fn migration_completed_in_progress_state_returns_false_before_mark() {
+        let done_snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
+        let pending_snapshot = ExportSnapshot::new(sample_savings_payload(), ExportFormat::Json);
+        let mut tracker = MigrationTracker::new();
+
+        // Complete the first migration.
+        tracker.mark_imported(&done_snapshot, 1_000).unwrap();
+        assert!(tracker.is_imported(&done_snapshot), "first must be completed");
+
+        // The second snapshot is in-progress (built, not yet marked).
+        assert!(
+            !tracker.is_imported(&pending_snapshot),
+            "second snapshot must still be in-progress (not completed) \
+             even though the tracker has entries for another payload"
+        );
+    }
+
+    /// The InProgress → Completed transition is atomic from the caller's
+    /// perspective: `mark_imported` either succeeds (→ Completed) or returns
+    /// `DuplicateImport` (snapshot was already Completed).
+    #[test]
+    fn migration_completed_in_progress_transitions_to_completed_on_mark() {
+        let snapshot = ExportSnapshot::new(sample_generic_payload(), ExportFormat::Json);
+        let mut tracker = MigrationTracker::new();
+
+        // InProgress: present but not yet marked.
+        assert!(!tracker.is_imported(&snapshot));
+
+        // Transition: InProgress → Completed.
+        let mark_result = tracker.mark_imported(&snapshot, 2_000);
+        assert!(
+            mark_result.is_ok(),
+            "first mark_imported must succeed (InProgress → Completed)"
+        );
+        assert!(tracker.is_imported(&snapshot));
+
+        // A second mark must be rejected — already Completed.
+        let dup_result = tracker.mark_imported(&snapshot, 3_000);
+        assert_eq!(
+            dup_result.unwrap_err(),
+            MigrationError::DuplicateImport,
+            "second mark_imported must return DuplicateImport (already Completed)"
+        );
+    }
+
+    /// Completed → InProgress rollback via `unmark_imported_by_identity` is the
+    /// mechanism that lets an operator retry a failed migration.  After unmarking,
+    /// `is_imported` must return `false` and `mark_imported` must succeed again.
+    #[test]
+    fn migration_completed_unmark_reverts_completed_to_in_progress() {
+        let snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
+        let mut tracker = MigrationTracker::new();
+
+        // Reach Completed state.
+        tracker.mark_imported(&snapshot, 5_000).unwrap();
+        assert!(tracker.is_imported(&snapshot));
+
+        // Rollback to InProgress via unmark.
+        tracker.unmark_imported_by_identity(
+            &snapshot.header.checksum,
+            snapshot.header.version,
+        );
+        assert!(
+            !tracker.is_imported(&snapshot),
+            "unmark must revert to InProgress (is_imported returns false)"
+        );
+
+        // Re-marking must succeed (confirming the rollback is clean).
+        tracker.mark_imported(&snapshot, 6_000).unwrap();
+        assert!(tracker.is_imported(&snapshot));
+    }
+
+    /// `unmark_imported_by_identity` on a snapshot that was never marked is a
+    /// no-op: the tracker stays in None/InProgress state without panicking.
+    #[test]
+    fn migration_completed_unmark_nonexistent_identity_is_no_op() {
+        let snapshot = ExportSnapshot::new(sample_savings_payload(), ExportFormat::Json);
+        let mut tracker = MigrationTracker::new();
+
+        // Tracker is in None state; snapshot was never marked.
+        assert!(!tracker.is_imported(&snapshot));
+
+        // Unmark a non-existent identity — must not panic.
+        tracker.unmark_imported_by_identity(
+            &snapshot.header.checksum,
+            snapshot.header.version,
+        );
+
+        // Still in None/InProgress state.
+        assert!(!tracker.is_imported(&snapshot));
+    }
+
+    /// Multiple independent snapshots each have their own Completed state;
+    /// completing one does not affect the others.
+    #[test]
+    fn migration_completed_each_snapshot_has_independent_completion_state() {
+        let s1 = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Json);
+        let s2 = ExportSnapshot::new(sample_savings_payload(), ExportFormat::Json);
+        let s3 = ExportSnapshot::new(sample_generic_payload(), ExportFormat::Json);
+        let mut tracker = MigrationTracker::new();
+
+        // None state for all three.
+        assert!(!tracker.is_imported(&s1));
+        assert!(!tracker.is_imported(&s2));
+        assert!(!tracker.is_imported(&s3));
+
+        // Complete s1 only.
+        tracker.mark_imported(&s1, 1_000).unwrap();
+
+        assert!(tracker.is_imported(&s1), "s1 must be Completed");
+        assert!(!tracker.is_imported(&s2), "s2 must remain InProgress/None");
+        assert!(!tracker.is_imported(&s3), "s3 must remain InProgress/None");
+
+        // Complete s3; s2 stays pending.
+        tracker.mark_imported(&s3, 2_000).unwrap();
+        assert!(tracker.is_imported(&s1));
+        assert!(!tracker.is_imported(&s2));
+        assert!(tracker.is_imported(&s3));
+    }
+
+    /// Binary-format imports also reach Completed state and are recognised by
+    /// `is_imported`, confirming the helper is format-agnostic (identity is
+    /// derived from checksum + version, not from the encoded bytes).
+    #[test]
+    fn migration_completed_binary_import_sets_completed_state() {
+        let snapshot = ExportSnapshot::new(sample_remittance_payload(), ExportFormat::Binary);
+        let bytes = export_to_binary(&snapshot).unwrap();
+        let mut tracker = MigrationTracker::new();
+
+        assert!(!tracker.is_imported(&snapshot));
+
+        import_from_binary(&bytes, &mut tracker, 7_000).unwrap();
+
+        assert!(
+            tracker.is_imported(&snapshot),
+            "binary-format import must also reach Completed state"
+        );
+    }
 }
