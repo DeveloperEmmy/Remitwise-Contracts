@@ -12,6 +12,19 @@ use soroban_sdk::{
     contracterror, contracttype, symbol_short, Address, Bytes, BytesN, Env, Map, Symbol,
 };
 
+#[soroban_sdk::contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum RemitwiseError {
+    Unauthorized = 1,
+    InvalidSignature = 2,
+    DeadlineExpired = 3,
+    RequestHashMismatch = 4,
+    InvalidAmount = 5,
+    InvalidNonce = 6,
+    DuplicateImport = 7,
+}
+
 /// Financial categories for remittance allocation
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,6 +108,22 @@ impl EventPriority {
     }
 }
 
+#[contracttype]
+#[derive(Clone)]
+pub struct RoleGrantedEvent {
+    pub member: Address,
+    pub role: FamilyRole,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct RoleRevokedEvent {
+    pub member: Address,
+    pub role: FamilyRole,
+    pub timestamp: u64,
+}
+
 /// Pagination limits
 pub const DEFAULT_PAGE_LIMIT: u32 = 20;
 pub const MAX_PAGE_LIMIT: u32 = 50;
@@ -145,21 +174,62 @@ pub enum BytesReturnError {
     ReturnTooLarge = 1,
 }
 
-/// Maximum allowed byte length for a short (inline) Symbol.
+/// Verifies that `from` is strictly less than `to`.
 ///
-/// The Soroban SDK stores symbols ≤ 9 bytes inline as short symbols;
-/// longer symbols use a separate XDR encoding.  This constant mirrors
-/// the implicit boundary in [`symbol_short!`] and in `Symbol::new`.
-pub const SHORT_SYMBOL_MAX_LEN: u32 = 9;
-
-/// Error returned when a Symbol exceeds the short-symbol length limit.
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum SymbolError {
-    /// The symbol's byte length exceeds [`SHORT_SYMBOL_MAX_LEN`].
-    SymbolTooLong = 1,
+/// # Panics
+/// - Panics if `from >= to`.
+pub fn verify_ordered_pair(from: u64, to: u64) {
+    if from >= to {
+        panic!("Invalid range: from ({from}) must be strictly less than to ({to})");
+    }
 }
+
+/// Verifies that the provided signature matches the admin's public key for the given message.
+///
+/// # Arguments
+/// - `env` - Soroban environment
+/// - `admin_pk` - Admin's Ed25519 public key
+/// - `message` - The message that was signed
+/// - `signature` - The Ed25519 signature
+///
+/// # Errors
+/// - `RemitwiseError::InvalidSignature` if the signature verification fails
+pub fn require_signed_by_admin(
+    env: &soroban_sdk::Env,
+    admin_pk: soroban_sdk::crypto::ed25519::PublicKey,
+    message: soroban_sdk::Bytes,
+    signature: soroban_sdk::crypto::ed25519::Signature,
+) -> Result<(), RemitwiseError> {
+    env.crypto()
+        .ed25519_verify(admin_pk, message, signature)
+        .map_err(|_| RemitwiseError::InvalidSignature)?;
+    Ok(())
+}
+
+/// Verifies that the provided signature matches the admin's public key for the given message.
+///
+/// # Arguments
+/// - `env` - Soroban environment
+/// - `admin_pk` - Admin's Ed25519 public key
+/// - `message` - The message that was signed
+/// - `signature` - The Ed25519 signature
+///
+/// # Errors
+/// - `RemitwiseError::InvalidSignature` if the signature verification fails
+pub fn require_signed_by_admin(
+    env: &soroban_sdk::Env,
+    admin_pk: soroban_sdk::crypto::ed25519::PublicKey,
+    message: soroban_sdk::Bytes,
+    signature: soroban_sdk::crypto::ed25519::Signature,
+) -> Result<(), RemitwiseError> {
+    env.crypto()
+        .ed25519_verify(admin_pk, message, signature)
+        .map_err(|_| RemitwiseError::InvalidSignature)?;
+    Ok(())
+}
+
+/// Event emission helper
+pub struct RemitwiseEvents;
 
 /// Validates that a [`Symbol`] does not exceed the short-symbol limit (9 bytes).
 ///
@@ -259,9 +329,39 @@ pub fn require_positive_settlement_amount(amount: i128) -> Result<(), Settlement
     }
 }
 
-#[cfg(test)]
-mod settlement_amount_tests {
-    use super::*;
+    // -----------------------------------------------------------------------
+    // require_signed_by_admin – verify signature verification
+    // -----------------------------------------------------------------------
+    #[test]
+    fn require_signed_by_admin_invalid_signature_panics() {
+        let env = Env::default();
+        let (admin_pk, admin_sk) = soroban_sdk::testutils::ed25519::generate(&env);
+        let message = soroban_sdk::Bytes::from_slice(&env, b"test message");
+        
+        // Sign with a different key
+        let (_wrong_pk, wrong_sk) = soroban_sdk::testutils::ed25519::generate(&env);
+        let signature = env.crypto().ed25519_sign(wrong_sk, message.clone());
+        
+        let result = require_signed_by_admin(&env, admin_pk, message, signature);
+        assert_eq!(result, Err(RemitwiseError::InvalidSignature));
+    }
+
+    #[test]
+    fn require_signed_by_admin_valid_signature_succeeds() {
+        let env = Env::default();
+        let (admin_pk, admin_sk) = soroban_sdk::testutils::ed25519::generate(&env);
+        let message = soroban_sdk::Bytes::from_slice(&env, b"test message");
+        
+        let signature = env.crypto().ed25519_sign(admin_sk, message.clone());
+        
+        let result = require_signed_by_admin(&env, admin_pk, message, signature);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn clamp_limit_zero_returns_default() {
+        assert_eq!(clamp_limit(0), DEFAULT_PAGE_LIMIT);
+    }
 
     #[test]
     fn rejects_zero() {
