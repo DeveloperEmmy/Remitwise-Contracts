@@ -110,7 +110,7 @@ pub fn insert_top_n<T, F>(
     item: T,
     mut cmp: F,
 ) where
-    T: Clone,
+    T: Clone + soroban_sdk::IntoVal<Env, soroban_sdk::Val> + soroban_sdk::TryFromVal<Env, soroban_sdk::Val>,
     F: FnMut(&T, &T) -> core::cmp::Ordering,
 {
     let mut inserted = false;
@@ -818,6 +818,8 @@ impl ToI128Checked for i32 {
 /// All Remitwise contracts express percentages in basis points (1 bps = 0.01%)
 /// so that integer arithmetic can be used without floating point.
 pub const BASIS_POINTS: u32 = 10_000;
+pub const BPS_PER_PERCENT: u32 = 100;
+pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
 
 /// Supported units for externally supplied rate inputs.
 ///
@@ -954,6 +956,21 @@ impl Rate {
     #[inline(always)]
     pub fn from_bps(bps: u32) -> Self {
         Self(bps)
+    }
+
+    /// Create a `Rate` from a whole percentage value.
+    #[inline(always)]
+    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
+        percent
+            .checked_mul(BPS_PER_PERCENT)
+            .map(Self::from_bps)
+            .ok_or(RateError::Overflow)
+    }
+
+    /// Create a `Rate` from a strongly-typed `Percent`.
+    #[inline(always)]
+    pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
+        percent.to_rate()
     }
 
     /// Construct a `Rate` from an externally supplied raw value plus unit.
