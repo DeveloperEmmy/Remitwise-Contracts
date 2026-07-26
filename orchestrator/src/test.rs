@@ -23,24 +23,9 @@ impl MockContract {
     pub fn pay_bill(_env: Env, _caller: Address, _bill_id: u32, _amount: i128) {}
     pub fn pay_premium(_env: Env, _caller: Address, _policy_id: u32, _amount: i128) {}
     // Compensation / reverse methods for rollback support.
-    pub fn remove_from_goal(
-        _env: Env,
-        _user: Address,
-        _goal_id: u32,
-        _amount: i128,
-    ) {}
-    pub fn reverse_payment(
-        _env: Env,
-        _user: Address,
-        _bill_id: u32,
-        _amount: i128,
-    ) {}
-    pub fn reverse_premium(
-        _env: Env,
-        _user: Address,
-        _policy_id: u32,
-        _amount: i128,
-    ) {}
+    pub fn remove_from_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {}
+    pub fn reverse_payment(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {}
+    pub fn reverse_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {}
 }
 
 #[contract]
@@ -620,9 +605,8 @@ fn test_execute_flow_signed_invalid_amount_zero() {
     let deadline = env.ledger().timestamp() + 1000;
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, 0, deadline);
 
-    let result = client.try_execute_remittance_flow_signed(
-        &executor, &0,
-        &0, &deadline, &hash, &0u64,    );
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &0, &0, &deadline, &hash, &0u64);
 
     assert_eq!(result, Err(Ok(OrchestratorError::InvalidAmount)));
 }
@@ -639,8 +623,13 @@ fn test_execute_flow_signed_invalid_amount_negative() {
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, -100, deadline);
 
     let result = client.try_execute_remittance_flow_signed(
-        &executor, &(-100i128),
-        &0, &deadline, &hash, &0u64,    );
+        &executor,
+        &(-100i128),
+        &0,
+        &deadline,
+        &hash,
+        &0u64,
+    );
 
     assert_eq!(result, Err(Ok(OrchestratorError::InvalidAmount)));
 }
@@ -657,8 +646,13 @@ fn test_execute_flow_signed_invalid_amount_i128_min() {
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, i128::MIN, deadline);
 
     let result = client.try_execute_remittance_flow_signed(
-        &executor, &(i128::MIN),
-        &0, &deadline, &hash, &0u64,    );
+        &executor,
+        &(i128::MIN),
+        &0,
+        &deadline,
+        &hash,
+        &0u64,
+    );
 
     assert_eq!(result, Err(Ok(OrchestratorError::InvalidAmount)));
 }
@@ -674,9 +668,8 @@ fn test_execute_flow_signed_valid_amount_minimum_positive() {
     let deadline = env.ledger().timestamp() + 1000;
     let hash = compute_test_hash(&env, symbol_short!("flow"), 0, 1, deadline);
 
-    let result = client.try_execute_remittance_flow_signed(
-        &executor, &1,
-        &0, &deadline, &hash, &0u64,    );
+    let result =
+        client.try_execute_remittance_flow_signed(&executor, &1, &0, &deadline, &hash, &0u64);
 
     assert!(
         result.is_ok(),
@@ -1727,24 +1720,9 @@ mod mock_split_4 {
         pub fn add_to_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {}
         pub fn pay_bill(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {}
         pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {}
-        pub fn remove_from_goal(
-            _env: Env,
-            _user: Address,
-            _goal_id: u32,
-            _amount: i128,
-        ) {}
-        pub fn reverse_payment(
-            _env: Env,
-            _user: Address,
-            _bill_id: u32,
-            _amount: i128,
-        ) {}
-        pub fn reverse_premium(
-            _env: Env,
-            _user: Address,
-            _policy_id: u32,
-            _amount: i128,
-        ) {}
+        pub fn remove_from_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {}
+        pub fn reverse_payment(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {}
+        pub fn reverse_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {}
     }
 }
 
@@ -1794,24 +1772,9 @@ mod mock_hostile_all_fail {
         pub fn pay_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {
             panic!("insurance step failed")
         }
-        pub fn remove_from_goal(
-            _env: Env,
-            _user: Address,
-            _goal_id: u32,
-            _amount: i128,
-        ) {}
-        pub fn reverse_payment(
-            _env: Env,
-            _user: Address,
-            _bill_id: u32,
-            _amount: i128,
-        ) {}
-        pub fn reverse_premium(
-            _env: Env,
-            _user: Address,
-            _policy_id: u32,
-            _amount: i128,
-        ) {}
+        pub fn remove_from_goal(_env: Env, _user: Address, _goal_id: u32, _amount: i128) {}
+        pub fn reverse_payment(_env: Env, _user: Address, _bill_id: u32, _amount: i128) {}
+        pub fn reverse_premium(_env: Env, _user: Address, _policy_id: u32, _amount: i128) {}
     }
 }
 

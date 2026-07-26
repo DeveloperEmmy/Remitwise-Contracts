@@ -833,7 +833,7 @@ fn distributes_indivisible_total_with_remainder_to_last_bucket() {
     assert_eq!(out[0], 50); // 100 * 50 / 100 = 50
     assert_eq!(out[1], 30); // 100 * 30 / 100 = 30
     assert_eq!(out[2], 15); // 100 * 15 / 100 = 15
-    assert_eq!(out[3], 5);  // 100 * 5 / 100 = 5, plus remainder 0
+    assert_eq!(out[3], 5); // 100 * 5 / 100 = 5, plus remainder 0
 
     // Conservation: sum equals input total
     assert_eq!(out.iter().sum::<i128>(), 100);
@@ -847,9 +847,9 @@ fn distributes_amount_with_non_zero_remainder_to_last_bucket() {
     // Allocated: 3 + 3 = 6, remainder: 10 - 6 = 4 goes to last bucket
     distribute_pro_rata(10, &[3333, 3333, 3334], 10_000, &mut out);
 
-    assert_eq!(out[0], 3);  // floor(10 * 3333 / 10000) = 3
-    assert_eq!(out[1], 3);  // floor(10 * 3333 / 10000) = 3
-    assert_eq!(out[2], 4);  // 10 - 3 - 3 = 4 (includes remainder)
+    assert_eq!(out[0], 3); // floor(10 * 3333 / 10000) = 3
+    assert_eq!(out[1], 3); // floor(10 * 3333 / 10000) = 3
+    assert_eq!(out[2], 4); // 10 - 3 - 3 = 4 (includes remainder)
 
     // Conservation
     assert_eq!(out.iter().sum::<i128>(), 10);
@@ -884,7 +884,7 @@ fn distributes_evenly_divisible_total_exactly() {
     assert_eq!(out[0], 500_000); // 1M * 5000 / 10000
     assert_eq!(out[1], 300_000); // 1M * 3000 / 10000
     assert_eq!(out[2], 150_000); // 1M * 1500 / 10000
-    assert_eq!(out[3], 50_000);  // 1M * 500 / 10000
+    assert_eq!(out[3], 50_000); // 1M * 500 / 10000
 
     // Conservation
     assert_eq!(out.iter().sum::<i128>(), 1_000_000);
@@ -926,7 +926,7 @@ fn distributes_with_zero_weight_recipient() {
     assert_eq!(out[0], 50);
     assert_eq!(out[1], 30);
     assert_eq!(out[2], 20);
-    assert_eq!(out[3], 0);  // zero weight → receives only remainder (0 in this case)
+    assert_eq!(out[3], 0); // zero weight → receives only remainder (0 in this case)
 
     // Conservation
     assert_eq!(out.iter().sum::<i128>(), 100);
@@ -955,10 +955,10 @@ fn distributes_using_basis_points_denomination() {
     // 5% = 500 bps, 3% = 300 bps, 1.5% = 150 bps, 0.5% = 50 bps
     distribute_pro_rata(1_000_000, &[500, 300, 150, 50], 10_000, &mut out);
 
-    assert_eq!(out[0], 50_000);  // 5%
-    assert_eq!(out[1], 30_000);  // 3%
-    assert_eq!(out[2], 15_000);  // 1.5%
-    assert_eq!(out[3], 5_000);   // 0.5%
+    assert_eq!(out[0], 50_000); // 5%
+    assert_eq!(out[1], 30_000); // 3%
+    assert_eq!(out[2], 15_000); // 1.5%
+    assert_eq!(out[3], 5_000); // 0.5%
 
     // Conservation
     assert_eq!(out.iter().sum::<i128>(), 100_000); // only 10% of total distributed
@@ -1035,14 +1035,8 @@ proptest! {
 
 #[test]
 fn test_require_supported_rate_unit_accepts_basis_points() {
-    assert_eq!(
-        require_supported_rate_unit(1),
-        Ok(RateUnit::BasisPoints)
-    );
-    assert_eq!(
-        Rate::try_from_input(500, 1),
-        Ok(Rate::from_bps(500))
-    );
+    assert_eq!(require_supported_rate_unit(1), Ok(RateUnit::BasisPoints));
+    assert_eq!(Rate::try_from_input(500, 1), Ok(Rate::from_bps(500)));
 }
 
 #[test]
@@ -1339,11 +1333,11 @@ proptest! {
 #[test]
 fn test_require_non_zero_bytes() {
     let env = Env::default();
-    
+
     // Valid cases
     let valid_bytes = soroban_sdk::BytesN::from_array(&env, &[1; 32]);
     assert_eq!(require_non_zero_bytes(&valid_bytes), Ok(()));
-    
+
     let mut mixed = [0; 32];
     mixed[31] = 1;
     let mixed_bytes = soroban_sdk::BytesN::from_array(&env, &mixed);
@@ -1351,5 +1345,8 @@ fn test_require_non_zero_bytes() {
 
     // Invalid case: all zeros
     let zero_bytes = soroban_sdk::BytesN::from_array(&env, &[0; 32]);
-    assert_eq!(require_non_zero_bytes(&zero_bytes), Err(BytesNError::AllZeros));
+    assert_eq!(
+        require_non_zero_bytes(&zero_bytes),
+        Err(BytesNError::AllZeros)
+    );
 }

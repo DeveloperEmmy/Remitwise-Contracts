@@ -3403,7 +3403,10 @@ mod testsuit {
 
         assert_eq!(
             emitted_actions,
-            [symbol_short!("paused_v2"), soroban_sdk::Symbol::new(&env, "unpaused_v2")]
+            [
+                symbol_short!("paused_v2"),
+                soroban_sdk::Symbol::new(&env, "unpaused_v2")
+            ]
         );
     }
 
