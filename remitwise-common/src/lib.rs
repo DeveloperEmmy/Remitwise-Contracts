@@ -98,6 +98,39 @@ impl EventPriority {
 pub const DEFAULT_PAGE_LIMIT: u32 = 20;
 pub const MAX_PAGE_LIMIT: u32 = 50;
 
+/// Max items returned in Top-N reports.
+pub const MAX_ITEMS_PER_REPORT: u32 = 10;
+
+/// Helper to insert an item into a Top-N list (bounded).
+/// The list is maintained in sorted order based on the provided comparator.
+pub fn insert_top_n<T, F>(
+    env: &Env,
+    top_list: &mut soroban_sdk::Vec<T>,
+    max_items: u32,
+    item: T,
+    mut cmp: F,
+) where
+    T: Clone,
+    F: FnMut(&T, &T) -> core::cmp::Ordering,
+{
+    let mut inserted = false;
+    for i in 0..top_list.len() {
+        if let Some(existing) = top_list.get(i) {
+            if cmp(&item, &existing) == core::cmp::Ordering::Greater {
+                top_list.insert(i, item.clone());
+                inserted = true;
+                break;
+            }
+        }
+    }
+
+    if !inserted && top_list.len() < max_items {
+        top_list.push_back(item);
+    } else if top_list.len() > max_items {
+        top_list.remove(max_items);
+    }
+}
+
 /// Standardized TTL Constants (Ledger Counts)
 pub const DAY_IN_LEDGERS: u32 = 17280; // ~5 seconds per ledger
 
