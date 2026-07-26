@@ -1732,19 +1732,24 @@ mod mock_split_4 {
             _user: Address,
             _goal_id: u32,
             _amount: i128,
-        ) {}
+        ) {
+        }
+
         pub fn reverse_payment(
             _env: Env,
             _user: Address,
             _bill_id: u32,
             _amount: i128,
-        ) {}
+        ) {
+        }
+
         pub fn reverse_premium(
             _env: Env,
             _user: Address,
             _policy_id: u32,
             _amount: i128,
-        ) {}
+        ) {
+        }
     }
 }
 
