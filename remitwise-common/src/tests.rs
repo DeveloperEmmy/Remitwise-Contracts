@@ -1335,3 +1335,108 @@ proptest! {
         prop_assert_eq!(p.to_bps(), Ok(pct * 100));
     }
 }
+
+// ============================================================================
+// Rate newtype round-trip and overflow tests (#1081)
+// ============================================================================
+
+#[test]
+fn test_rate_from_bps_to_bps_roundtrip() {
+    for bps in [0, 1, 100, 500, 10_000, 50_000, u32::MAX] {
+        let rate = Rate::from_bps(bps);
+        assert_eq!(rate.to_bps(), bps);
+    }
+    assert_eq!(Rate::ZERO.to_bps(), 0);
+    assert_eq!(Rate::MAX.to_bps(), u32::MAX);
+}
+
+#[test]
+fn test_rate_apply_to_zero_rate_returns_zero() {
+    let rate = Rate::ZERO;
+    assert_eq!(rate.apply_to(0), Ok(0));
+    assert_eq!(rate.apply_to(1_000), Ok(0));
+    assert_eq!(rate.apply_to(i128::MAX), Ok(0));
+    assert_eq!(rate.apply_to(-1_000), Ok(0));
+    assert_eq!(rate.apply_to(i128::MIN), Ok(0));
+}
+
+#[test]
+fn test_rate_apply_to_zero_amount_returns_zero() {
+    assert_eq!(Rate::from_bps(500).apply_to(0), Ok(0));
+    assert_eq!(Rate::from_bps(BASIS_POINTS).apply_to(0), Ok(0));
+    assert_eq!(Rate::MAX.apply_to(0), Ok(0));
+}
+
+#[test]
+fn test_rate_apply_to_hundred_percent_returns_exact_amount() {
+    let hundred_percent = Rate::from_bps(BASIS_POINTS);
+    assert_eq!(hundred_percent.apply_to(1_000), Ok(1_000));
+    assert_eq!(hundred_percent.apply_to(-500), Ok(-500));
+
+    // Safe maximum for 100% rate without overflowing i128 intermediate product
+    let safe_max = i128::MAX / (BASIS_POINTS as i128);
+    assert_eq!(hundred_percent.apply_to(safe_max), Ok(safe_max));
+}
+
+#[test]
+fn test_rate_apply_to_partial_percentages_and_truncation() {
+    // 5% of 1,000 = 50
+    let rate_5pct = Rate::from_bps(500);
+    assert_eq!(rate_5pct.apply_to(1_000), Ok(50));
+    assert_eq!(rate_5pct.apply_to(-1_000), Ok(-50));
+
+    // 0.01% (1 bps) of 10,000 = 1
+    let rate_1bps = Rate::from_bps(1);
+    assert_eq!(rate_1bps.apply_to(10_000), Ok(1));
+
+    // Truncation towards zero: floor(9,999 * 1 / 10,000) = 0
+    assert_eq!(rate_1bps.apply_to(9_999), Ok(0));
+}
+
+#[test]
+fn test_rate_apply_to_multiplication_overflow() {
+    // Large amounts exceeding i128::MAX / rate
+    assert_eq!(Rate::from_bps(2).apply_to(i128::MAX), Err(RateError::Overflow));
+    assert_eq!(Rate::MAX.apply_to(i128::MAX), Err(RateError::Overflow));
+    assert_eq!(Rate::from_bps(2).apply_to(i128::MIN), Err(RateError::Overflow));
+
+    // Exact boundary test for 500 bps (5%)
+    let rate = Rate::from_bps(500);
+    let max_safe = i128::MAX / 500;
+    let expected = (max_safe * 500) / (BASIS_POINTS as i128);
+    assert_eq!(rate.apply_to(max_safe), Ok(expected));
+
+    let overflow_amount = max_safe + 1;
+    assert_eq!(rate.apply_to(overflow_amount), Err(RateError::Overflow));
+}
+
+#[test]
+fn test_rate_to_i128_checked() {
+    assert_eq!(Rate::from_bps(500).to_i128_checked(), Ok(500i128));
+    assert_eq!(Rate::MAX.to_i128_checked(), Ok(u32::MAX as i128));
+}
+
+proptest! {
+    #[test]
+    fn proptest_rate_bps_roundtrip(bps in any::<u32>()) {
+        let rate = Rate::from_bps(bps);
+        prop_assert_eq!(rate.to_bps(), bps);
+    }
+
+    #[test]
+    fn proptest_rate_apply_to_roundtrip_and_overflow(bps in any::<u32>(), amount in any::<i128>()) {
+        let rate = Rate::from_bps(bps);
+        let result = rate.apply_to(amount);
+
+        match amount.checked_mul(bps as i128) {
+            Some(product) => {
+                let expected = product / (BASIS_POINTS as i128);
+                prop_assert_eq!(result, Ok(expected));
+            }
+            None => {
+                prop_assert_eq!(result, Err(RateError::Overflow));
+            }
+        }
+    }
+}
+
