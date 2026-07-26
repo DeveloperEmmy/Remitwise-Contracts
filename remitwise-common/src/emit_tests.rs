@@ -1,5 +1,6 @@
 use crate::{EventCategory, EventPriority, RemitwiseEvents};
-use soroban_sdk::{symbol_short, Env, Vec};
+use soroban_sdk::testutils::Events;
+use soroban_sdk::{symbol_short, Env, FromVal, Vec};
 
 #[test]
 fn test_compact_event_passes() {
@@ -50,9 +51,9 @@ fn test_emit_topics_include_remitwise_sentinel() {
     assert!(!events.is_empty());
     // The first topic element must be the Remitwise sentinel symbol.
     let (_cid, topics, _data) = events.last().unwrap();
-    let sentinel = soroban_sdk::Val::from_val(&env, &topics.get(0).unwrap());
-    let expected = soroban_sdk::Symbol::new(&env, "Remitwise").to_val();
-    assert_eq!(sentinel.get_payload(), expected.get_payload());
+    let sentinel: soroban_sdk::Symbol = FromVal::from_val(&env, &topics.get(0).unwrap());
+    let expected = soroban_sdk::Symbol::new(&env, "Remitwise");
+    assert_eq!(sentinel, expected);
 }
 
 #[test]

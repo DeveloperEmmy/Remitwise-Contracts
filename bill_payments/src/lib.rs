@@ -4,10 +4,9 @@
 use remitwise_common::reversible_op::{BillPaymentsReversible, ReversibleOpError};
 use remitwise_common::{
     check_and_increment_rate_limit, clamp_limit, require_stable_currency, EventCategory,
-    EventPriority, RemitwiseEvents, Timestamp, ARCHIVE_BUMP_AMOUNT,
-    ARCHIVE_LIFETIME_THRESHOLD, CONTRACT_VERSION, DEFAULT_CURRENCY,
-    INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD, MAX_BATCH_SIZE, MAX_CURRENCY_LEN,
-    SNAPSHOT_KEY, SNAPSHOT_VERSION,
+    EventPriority, RemitwiseEvents, Timestamp, ARCHIVE_BUMP_AMOUNT, ARCHIVE_LIFETIME_THRESHOLD,
+    CONTRACT_VERSION, DEFAULT_CURRENCY, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD,
+    MAX_BATCH_SIZE, MAX_CURRENCY_LEN, SNAPSHOT_KEY, SNAPSHOT_VERSION,
 };
 
 use soroban_sdk::{
@@ -206,7 +205,7 @@ pub enum BillPaymentsError {
     /// The page is empty so there is no first item to return.
     EmptyPage = 29,
     /// Bill or schedule name is invalid (empty or exceeds max length)
-    InvalidName = 30
+    InvalidName = 30,
 }
 
 pub type Error = BillPaymentsError;
@@ -714,8 +713,7 @@ impl BillPayments {
         // Defence-in-depth: reject rebase/deflationary tokens.
         // After normalizing to uppercase, verify the symbol is a recognized stable asset.
         let sym = Symbol::new(env, upper_str);
-        require_stable_currency(env, &sym)
-            .map_err(|_| BillPaymentsError::UnsupportedCurrency)?;
+        require_stable_currency(env, &sym).map_err(|_| BillPaymentsError::UnsupportedCurrency)?;
 
         Ok(String::from_str(env, upper_str))
     }
