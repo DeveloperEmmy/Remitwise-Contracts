@@ -2549,3 +2549,105 @@ fn bump_actor_epoch_overflow_returns_error() {
     // Epoch must remain at u64::MAX — the bump must not have mutated storage.
     assert_eq!(client.get_actor_epoch_public(), u64::MAX);
 }
+
+// ---------------------------------------------------------------------------
+// get_fee_schedule view function tests
+// ---------------------------------------------------------------------------
+
+/// Mock remittance split contract that returns a fixed split.
+mod mock_remittance_split {
+    use soroban_sdk::{contract, contractimpl, Env, Vec};
+
+    #[contract]
+    pub struct Contract;
+
+    #[contractimpl]
+    impl Contract {
+        pub fn get_split(env: Env) -> Vec<u32> {
+            soroban_sdk::vec![&env, 5000u32, 3000u32, 1500u32, 500u32]
+        }
+        pub fn calculate_split(env: Env, _total_amount: i128) -> Vec<i128> {
+            soroban_sdk::vec![&env, 5000i128, 3000i128, 1500i128, 500i128]
+        }
+    }
+}
+
+/// Mock remittance split contract that returns an invalid split (wrong length).
+mod mock_remittance_split_invalid {
+    use soroban_sdk::{contract, contractimpl, Env, Vec};
+
+    #[contract]
+    pub struct Contract;
+
+    #[contractimpl]
+    impl Contract {
+        pub fn get_split(env: Env) -> Vec<u32> {
+            soroban_sdk::vec![&env, 5000u32, 3000u32] // Only 2 entries
+        }
+        pub fn calculate_split(env: Env, _total_amount: i128) -> Vec<i128> {
+            soroban_sdk::vec![&env, 5000i128, 3000i128]
+        }
+    }
+}
+
+#[test]
+fn test_get_fee_schedule_returns_correct_split() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+
+    // Initialize with a mock remittance split contract
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, mock_remittance_split::Contract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    // Call the view function
+    let result = client.get_fee_schedule();
+
+    assert!(result.is_some(), "fee schedule should be Some");
+    let (spending, savings, bills, insurance) = result.unwrap();
+    assert_eq!(spending, 5000);
+    assert_eq!(savings, 3000);
+    assert_eq!(bills, 1500);
+    assert_eq!(insurance, 500);
+    // Sum should be 10000 (100%)
+    assert_eq!(spending + savings + bills + insurance, 10000);
+}
+
+#[test]
+fn test_get_fee_schedule_returns_none_when_invalid_split() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+    let owner = Address::generate(&env);
+
+    // Initialize with a mock remittance split that returns invalid length
+    let fw = env.register_contract(None, MockContract);
+    let rs = env.register_contract(None, mock_remittance_split_invalid::Contract);
+    let sg = env.register_contract(None, MockContract);
+    let bp = env.register_contract(None, MockContract);
+    let ins = env.register_contract(None, MockContract);
+    client.init(&owner, &fw, &rs, &sg, &bp, &ins);
+
+    // Call the view function - should return None for invalid split
+    let result = client.get_fee_schedule();
+    assert!(result.is_none(), "fee schedule should be None for invalid split");
+}
+
+#[test]
+fn test_get_fee_schedule_returns_none_when_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let client = OrchestratorClient::new(&env, &orchestrator_id);
+
+    // Don't initialize - should return None
+    let result = client.get_fee_schedule();
+    assert!(result.is_none(), "fee schedule should be None when not initialized");
+}
