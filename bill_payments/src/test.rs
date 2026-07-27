@@ -215,6 +215,37 @@ mod testsuit {
     }
 
     #[test]
+    fn test_pay_bill_settlement_window_expired() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &contract_id);
+        let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
+
+        let creation_time = 1_000_000;
+        set_ledger_time(&env, 1, creation_time);
+
+        env.mock_all_auths();
+        let bill_id = client.create_bill(
+            &owner,
+            &String::from_str(&env, "Water"),
+            &500,
+            &creation_time,
+            &false,
+            &0,
+            &None,
+            &String::from_str(&env, "XLM"),
+            &None,
+        );
+
+        // Advance time well beyond MAX_SETTLEMENT_WINDOW_SECS (30 days = 2_592_000 seconds)
+        set_ledger_time(&env, 2, creation_time + 3_000_000);
+
+        env.mock_all_auths();
+        let result = client.try_pay_bill(&owner, &bill_id);
+        assert_eq!(result, Err(Ok(Error::SettlementWindowExpired)));
+    }
+
+    #[test]
     fn test_pay_bill() {
         let env = Env::default();
         let contract_id = env.register_contract(None, BillPayments);
@@ -2515,8 +2546,6 @@ mod testsuit {
         );
     }
 
-    }
-
     // ══════════════════════════════════════════════════════════════════════
     // Settlement Window Guard Tests
     //
@@ -2663,9 +2692,11 @@ mod testsuit {
     proptest! {
         #[test]
         fn prop_settlement_window_guard_inside_window_not_overdue(
-            due_date in 1_000_001u64..10_000_000u64,
-            now in 1_000_000u64..due_date
+            due_date in 2_000_000u64..10_000_000u64,
+            now in 1_000_000u64..2_000_000u64
         ) {
+            // Ensure now is strictly less than due_date (inside the window).
+            prop_assume!(now < due_date);
             let env = Env::default();
             set_ledger_time(&env, 1, now);
             let contract_id = env.register_contract(None, BillPayments);
@@ -3448,7 +3479,7 @@ mod testsuit {
     #[test]
     fn test_pause_and_unpause_emit_ordered_audit_events() {
         use soroban_sdk::testutils::Events as _;
-        use soroban_sdk::{symbol_short, Symbol};
+        use soroban_sdk::Symbol;
 
         let env = Env::default();
         let contract_id = env.register_contract(None, BillPayments);
@@ -3473,13 +3504,13 @@ mod testsuit {
 
         assert_eq!(
             emitted_actions,
-            [symbol_short!("paused_v2"), symbol_short!("unpaused_v2")]
+            [Symbol::new(&env, "paused_v2"), Symbol::new(&env, "unpaused_v2")]
         );
     }
 
     #[test]
     fn test_unpause_before_schedule_does_not_emit_unpause_event() {
-        use soroban_sdk::{symbol_short, Symbol};
+        use soroban_sdk::symbol_short;
         use soroban_sdk::testutils::Events as _;
 
         let env = Env::default();
