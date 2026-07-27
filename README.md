@@ -350,6 +350,7 @@ To run an example, use `cargo run --example <example_name>`:
 - [Storage Layout Reference](STORAGE_LAYOUT.md)
 - [Reserved Storage Keys](docs/RESERVED_STORAGE_KEYS.md) - Storage keys reserved for roadmap features to prevent collisions (contributor guide)
 - [Contract Specs & Migrations](docs/MIGRATIONS.md) - How to bump a contract spec without breaking existing storage
+- [Migration Paths: N-2 → N](docs/MIGRATION_PATHS.md) - Contributor guide: N-2→N snapshot migration paths, per-payload invariants, test map, rollback, and golden-vector discipline
 - [Event Indexer](indexer/README.md) - Off-chain event indexing and querying
 - [Audit Trail](docs/AUDIT_TRAIL.md) - How to reconstruct historical state from events alone
 - [Settler Whitelist](docs/SETTLER_WHITELIST.md) - Operator guide: how settlers are added, rotated, and revoked
