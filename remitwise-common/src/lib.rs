@@ -2638,7 +2638,7 @@ mod encoding_stability_tests {
 
 #[cfg(test)]
 mod stable_currency_tests {
-    use super::{require_stable_currency, StableCurrencyError};
+    use super::{require_supported_currency, require_stable_currency, StableCurrencyError};
     use soroban_sdk::{Env, Symbol};
 
     // --- Whitelisted paths: currency accepted by stable currency allowlist ---
@@ -2895,5 +2895,120 @@ mod stable_currency_tests {
             require_stable_currency(&env, &sym),
             Err(StableCurrencyError::UnsupportedCurrency)
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Additional boundary tests added per FWC26 issue
+    // "Stable, rebase-suspected, unknown" — locks in the
+    // accept-vs-reject boundary between the stable-currency allowlist
+    // and the reject-by-default fallback.
+    //
+    // Existing tests already cover the bulk of the boundary
+    // (each known stable accepted; rebase/volatile/unknown tokens
+    // rejected; case-insensitive; numeric/special/long rejected).
+    // These four tests target invariants that were not explicitly
+    // pinned: alias equivalence with `require_supported_currency`,
+    // single-character displacement, the 9-byte envelope, and padding.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// `require_supported_currency` is documented as a public alias for
+    /// [`require_stable_currency`]. This test pins that contract for every
+    /// entry in the allowlist so a future refactor cannot silently diverge
+    /// the two entry points.
+    #[test]
+    fn accepts_require_supported_currency_alias_for_every_allowlisted_entry() {
+        let env = Env::default();
+
+        for code in STABLE_CURRENCIES {
+            let sym = Symbol::new(&env, code);
+            assert_eq!(
+                require_stable_currency(&env, &sym),
+                Ok(()),
+                "require_stable_currency must accept allowlisted entry {:?}",
+                code
+            );
+            assert_eq!(
+                require_supported_currency(&env, &sym),
+                Ok(()),
+                "require_supported_currency alias must accept allowlisted entry {:?}",
+                code
+            );
+            // The two entry points must agree byte-for-byte.
+            assert_eq!(
+                require_stable_currency(&env, &sym),
+                require_supported_currency(&env, &sym),
+                "alias diverged from require_stable_currency for {:?}",
+                code
+            );
+        }
+    }
+
+    /// A single-byte displacement away from a whitelisted currency
+    /// must still be rejected. Catches future refactors that loosen
+    /// the comparison (prefix-match, near-match, fuzzy compare).
+    #[test]
+    fn rejects_one_byte_displacement_of_allowlisted_currency() {
+        let env = Env::default();
+        // Each variant differs from a whitelisted code (USDC) by
+        // exactly one ASCII byte at various positions: swap,
+        // duplicate, digit-suffix, digit-prefix. None of these are
+        // in `STABLE_CURRENCIES`, so they must all be rejected.
+        // ("." and whitespace variants are excluded because they are
+        // outside Symbol's `[a-zA-Z0-9_]` charset — `Symbol::new`
+        // would panic on them and mask the boundary we want to test.)
+        for variant in [
+            "USDX",     // swap last byte of USDC
+            "USCA",     // swap last + a different letter
+            "UCDC",     // swap second byte of USDC
+            "USDCC",    // duplicate last byte
+            "USDC0",    // digit suffix
+            "0USDC",    // digit prefix
+        ] {
+            let sym = Symbol::new(&env, variant);
+            assert_eq!(
+                require_stable_currency(&env, &sym),
+                Err(StableCurrencyError::UnsupportedCurrency),
+                "{:?} (one byte away from USDC) must be rejected as a near-miss",
+                variant
+            );
+        }
+    }
+
+    /// A `Symbol` whose length is exactly the short-symbol maximum
+    /// (9 bytes) must not be silently accepted just because the SDK
+    /// encodes it inline. This pins the 9-byte envelope boundary
+    /// documented by `SYMBOL_SHORT_MAX_LEN`.
+    #[test]
+    fn rejects_exactly_nine_byte_unknown_symbol() {
+        let env = Env::default();
+        // "RANDOMX9Z" is exactly 9 ASCII bytes and is not in
+        // STABLE_CURRENCIES.
+        let sym = Symbol::new(&env, "RANDOMX9Z");
+        assert_eq!(
+            require_stable_currency(&env, &sym),
+            Err(StableCurrencyError::UnsupportedCurrency)
+        );
+    }
+
+    /// Allowlist membership is an exact-ASCII match. Padding,
+    /// prefixing, or suffixing an allow-listed code never widens
+    /// acceptance. This pins the comparator — a switch to a
+    /// `starts_with` or `contains` would be caught immediately.
+    /// Note: whitespace-padded variants like `"USDC "` are
+    /// excluded from this test because Symbol's charset is
+    /// `[a-zA-Z0-9_]`; `Symbol::new` would panic on whitespace,
+    /// masking the boundary under test.
+    #[test]
+    fn rejects_padded_variant_of_allowlisted_currency() {
+        let env = Env::default();
+        for variant in ["USDC0", "XUSDC", "USDCX"] {
+            let sym = Symbol::new(&env, variant);
+            assert_eq!(
+                require_stable_currency(&env, &sym),
+                Err(StableCurrencyError::UnsupportedCurrency),
+                "padded variant {:?} must not be accepted as USDC",
+                variant
+            );
+        }
     }
 }
