@@ -1,16 +1,14 @@
 #![no_std]
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-use soroban_sdk::{contracterror, contracttype, symbol_short, Bytes, BytesN, Symbol};
+use soroban_sdk::{contracterror, contracttype, symbol_short, Address, Bytes, BytesN, Env, Map, Symbol};
 pub mod tokens;
 pub use tokens::{
     SupportedToken, BASE_UNITS_PER_EURC, BASE_UNITS_PER_USDC, DEFAULT_CURRENCY, EURC_DECIMALS,
     MAX_CURRENCY_LEN, STROOPS_PER_XLM, USDC_DECIMALS, XLM_DECIMALS,
 };
 
-use soroban_sdk::{
-    contracterror, contracttype, symbol_short, Address, Bytes, BytesN, Env, Map, Symbol,
-};
+
 
 #[soroban_sdk::contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -324,8 +322,7 @@ pub fn require_non_zero_bytes<const N: usize>(bytes: &BytesN<N>) -> Result<(), B
 /// constructor and therefore cannot be used as constant storage keys.
 pub const SYMBOL_SHORT_MAX_LEN: u32 = 9;
 
-/// Error returned when a candidate symbol name fails the length check enforced
-/// by [`require_valid_symbol_length`].
+/// Error returned when a candidate symbol name fails the length check enforced    /// by [`require_valid_symbol_name_length`].
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -366,12 +363,12 @@ pub enum SymbolError {
 ///
 /// # Example
 /// ```ignore
-/// use remitwise_common::{require_valid_symbol_length, SymbolLengthError};
-/// assert_eq!(require_valid_symbol_length(b"CONFIG"), Ok(()));
-/// assert_eq!(require_valid_symbol_length(b""), Err(SymbolLengthError::Empty));
-/// assert_eq!(require_valid_symbol_length(b"TOOLONGKEY"), Err(SymbolLengthError::TooLong));
+/// use remitwise_common::{require_valid_symbol_name_length, SymbolLengthError};
+/// assert_eq!(require_valid_symbol_name_length(b"CONFIG"), Ok(()));
+/// assert_eq!(require_valid_symbol_name_length(b""), Err(SymbolLengthError::Empty));
+/// assert_eq!(require_valid_symbol_name_length(b"TOOLONGKEY"), Err(SymbolLengthError::TooLong));
 /// ```
-pub fn require_valid_symbol_length(name: &[u8]) -> Result<(), SymbolLengthError> {
+pub fn require_valid_symbol_name_length(name: &[u8]) -> Result<(), SymbolLengthError> {
     if name.is_empty() {
         return Err(SymbolLengthError::Empty);
     }
@@ -1719,6 +1716,9 @@ impl RemitwiseEvents {
             action,
         );
 
+        #[cfg(not(test))]
+        env.events().publish(topics, data);
+
         #[cfg(test)]
         {
             use soroban_sdk::TryFromVal;
@@ -1732,9 +1732,8 @@ impl RemitwiseEvents {
                     );
                 }
             }
+            env.events().publish(topics, val);
         }
-
-        env.events().publish(topics, data);
     }
 
     /// Emits a batch event for the given category and action with a count.
@@ -1755,7 +1754,13 @@ impl RemitwiseEvents {
             symbol_short!("batch"),
         );
         let data = (action, count);
+        #[cfg(not(test))]
         env.events().publish(topics, data);
+        #[cfg(test)]
+        {
+            let val: soroban_sdk::Val = data.into_val(env);
+            env.events().publish(topics, val);
+        }
     }
 
     /// Test helper: asserts that the most recently emitted Remitwise event has
