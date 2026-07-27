@@ -8044,3 +8044,46 @@ fn test_configure_multisig_blocked_by_pending_operations() {
         "configure_multisig must reject when pending proposals exist"
     );
 }
+
+// ============================================================================
+// Archive Integrity Tests (SC-004)
+//
+// Verify that archive_old_transactions fails closed when EXEC_TXS contains
+// a corrupted entry whose map key does not match meta.tx_id.
+// ============================================================================
+
+#[test]
+#[should_panic(expected = "Inconsistent executed transaction metadata")]
+fn test_archive_integrity_rejects_mismatched_tx_id() {
+    let env = Env::default();
+    env.mock_all_auths();
+    set_ledger_time(&env, 100, 50_000);
+
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    client.init(&owner, &vec![&env]);
+
+    // Inject a corrupted ExecutedTxMeta directly into instance storage.
+    // Map key = 999, but meta.tx_id = 42 — a deliberate mismatch that
+    // archive_old_transactions must detect and abort on.
+    env.as_contract(&contract_id, || {
+        let mut corrupted_map: Map<u64, ExecutedTxMeta> = Map::new(&env);
+        corrupted_map.set(
+            999_u64,
+            ExecutedTxMeta {
+                tx_id: 42,
+                tx_type: TransactionType::RegularWithdrawal,
+                proposer: owner.clone(),
+                executed_at: 1_000,
+            },
+        );
+        env.storage()
+            .instance()
+            .set(&symbol_short!("EXEC_TXS"), &corrupted_map);
+    });
+
+    // Archive with a cutoff well after executed_at so the corrupted entry
+    // would be eligible for archiving — triggering the integrity check.
+    client.archive_old_transactions(&owner, &10_000);
+}
