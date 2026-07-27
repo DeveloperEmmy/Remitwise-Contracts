@@ -328,12 +328,7 @@ To run an example, use `cargo run --example <example_name>`:
 
 ## Documentation
 
-- [Contributor Overview](docs/CONTRIBUTOR_OVERVIEW.md) - Onboarding guide for new contributors
-- [Contract Semantics](docs/CONTRACT_SEMANTICS.md) - Behavioral invariants every contract must respect to interoperate correctly
-- [ADR: Ban unwrap in Release Builds](docs/adr-ban-unwrap-in-release.md) - Why unwrap and panic are forbidden in production contract code
-- [Panic Taxonomy](docs/PANIC_TAXONOMY.md) - Every panic path documented with recovery guidance
-- [Changelog](CHANGELOG.md) - Conventional-commits-style log of every release
-- [Token Decimal Catalogue](docs/DECIMAL_CATALOGUE.md) - Reference table of decimals expected for each canonical token
+- [Top-N Queries](docs/TOP_N_QUERIES.md) - Which entrypoints expose top-N results and their bounds
 - [Authorization Matrix](docs/AUTHORIZATION_MATRIX.md) - Per-entrypoint caller authorization requirements for all contracts
 - [Pagination Handbook](docs/PAGINATION_HANDBOOK.md) - How every paginated read is structured, cursor semantics, reviewer checklist, and implementation guide
 - [Pause Playbook](docs/PAUSE_PLAYBOOK.md) - Emergency pause mechanisms and recovery procedures for operators
