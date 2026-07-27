@@ -839,6 +839,37 @@ fn test_timestamp_seconds_until_u64_max_boundary() {
     assert_eq!(Timestamp::seconds_until(u64::MAX - 1, u64::MAX), 1);
 }
 
+/// Maximum possible distance: now at 0, target at `u64::MAX`.
+/// Pins that the return value can represent the full `u64` range.
+#[test]
+fn test_timestamp_seconds_until_max_distance_zero_to_u64_max() {
+    assert_eq!(Timestamp::seconds_until(0, u64::MAX), u64::MAX);
+}
+
+/// Max past: now at `u64::MAX`, target at 0 saturates at zero.
+#[test]
+fn test_timestamp_seconds_until_max_past_u64_max_to_zero_saturates() {
+    assert_eq!(Timestamp::seconds_until(u64::MAX, 0), 0);
+}
+
+/// Equal timestamps at the maximum boundary return zero.
+#[test]
+fn test_timestamp_seconds_until_equal_at_u64_max_returns_zero() {
+    assert_eq!(Timestamp::seconds_until(u64::MAX, u64::MAX), 0);
+}
+
+/// Base case: both now and target at epoch zero return zero.
+#[test]
+fn test_timestamp_seconds_until_zero_now_zero_target_returns_zero() {
+    assert_eq!(Timestamp::seconds_until(0, 0), 0);
+}
+
+/// Near-max distance: now at 1, target at `u64::MAX`.
+#[test]
+fn test_timestamp_seconds_until_near_max_distance_from_one_to_u64_max() {
+    assert_eq!(Timestamp::seconds_until(1, u64::MAX), u64::MAX - 1);
+}
+
 // ─── Current, Future, Past Temporal Tests (Timestamp & validate_period) ──────
 
 /// validate_period returns Ok when start equals end (current/same timestamp).
