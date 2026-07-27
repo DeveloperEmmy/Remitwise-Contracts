@@ -1,16 +1,14 @@
 #![no_std]
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-use soroban_sdk::{contracterror, contracttype, symbol_short, Bytes, BytesN, Symbol};
+use soroban_sdk::{contracterror, contracttype, symbol_short, Address, Bytes, BytesN, Env, Map, Symbol};
 pub mod tokens;
 pub use tokens::{
     SupportedToken, BASE_UNITS_PER_EURC, BASE_UNITS_PER_USDC, DEFAULT_CURRENCY, EURC_DECIMALS,
     MAX_CURRENCY_LEN, STROOPS_PER_XLM, USDC_DECIMALS, XLM_DECIMALS,
 };
 
-use soroban_sdk::{
-    contracterror, contracttype, symbol_short, Address, Bytes, BytesN, Env, Map, Symbol,
-};
+
 
 #[soroban_sdk::contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -254,7 +252,8 @@ pub struct RemitwiseEvents;
 /// # Errors
 /// Returns [`SymbolError::SymbolTooLong`] when the symbol exceeds 9 bytes.
 pub fn require_valid_symbol_length(_env: &Env, sym: &Symbol) -> Result<(), SymbolError> {
-    if sym.to_val().is_object() {
+    let val: soroban_sdk::Val = (*sym).into();
+    if val.is_object() {
         Err(SymbolError::SymbolTooLong)
     } else {
         Ok(())
@@ -278,26 +277,6 @@ pub fn guard_bytes_len(bytes: &Bytes) -> Result<(), BytesReturnError> {
     }
 }
 
-/// Guards against executing dispute-related operations in an outdated epoch.
-///
-/// This is a defence-in-depth fix. If an attacker could proceed with dispute-related 
-/// operations in an outdated epoch, they could bypass lifecycle expiration rules, 
-/// allowing them to manipulate dispute resolutions or lock funds unexpectedly.
-///
-/// # Arguments
-/// * `env` - Soroban environment
-/// * `ep` - The dispute epoch supplied by the caller
-///
-/// # Returns
-/// * `Ok(())` if the epoch is greater than or equal to the current pending dispute epoch
-/// * `Err(DisputeError::OutdatedEpoch)` if the epoch is outdated
-pub fn require_no_pending_dispute_epoch(env: &Env, ep: u64) -> Result<(), DisputeError> {
-    let current_epoch: u64 = env.storage().instance().get(&symbol_short!("DISP_EP")).unwrap_or(0);
-    if ep < current_epoch {
-        return Err(DisputeError::OutdatedEpoch);
-    }
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // BytesN validation
@@ -343,8 +322,7 @@ pub fn require_non_zero_bytes<const N: usize>(bytes: &BytesN<N>) -> Result<(), B
 /// constructor and therefore cannot be used as constant storage keys.
 pub const SYMBOL_SHORT_MAX_LEN: u32 = 9;
 
-/// Error returned when a candidate symbol name fails the length check enforced
-/// by [`require_valid_symbol_length`].
+/// Error returned when a candidate symbol name fails the length check enforced    /// by [`require_valid_symbol_name_length`].
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -353,6 +331,18 @@ pub enum SymbolLengthError {
     Empty = 1,
     /// The symbol name exceeds [`SYMBOL_SHORT_MAX_LEN`] bytes.
     TooLong = 2,
+}
+
+/// Error returned when a [`Symbol`] value exceeds the short-symbol limit (9 bytes).
+///
+/// Short symbols are stored inline in the [`Val`] bit pattern; long symbols use
+/// the heap-allocating `SymbolObject` XDR encoding.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum SymbolError {
+    /// The symbol exceeds 9 bytes (too large for inline `symbol_short!` encoding).
+    SymbolTooLong = 1,
 }
 
 /// Validates that a candidate symbol name is within the bounds accepted by the
@@ -373,12 +363,12 @@ pub enum SymbolLengthError {
 ///
 /// # Example
 /// ```ignore
-/// use remitwise_common::{require_valid_symbol_length, SymbolLengthError};
-/// assert_eq!(require_valid_symbol_length(b"CONFIG"), Ok(()));
-/// assert_eq!(require_valid_symbol_length(b""), Err(SymbolLengthError::Empty));
-/// assert_eq!(require_valid_symbol_length(b"TOOLONGKEY"), Err(SymbolLengthError::TooLong));
+/// use remitwise_common::{require_valid_symbol_name_length, SymbolLengthError};
+/// assert_eq!(require_valid_symbol_name_length(b"CONFIG"), Ok(()));
+/// assert_eq!(require_valid_symbol_name_length(b""), Err(SymbolLengthError::Empty));
+/// assert_eq!(require_valid_symbol_name_length(b"TOOLONGKEY"), Err(SymbolLengthError::TooLong));
 /// ```
-pub fn require_valid_symbol_length(name: &[u8]) -> Result<(), SymbolLengthError> {
+pub fn require_valid_symbol_name_length(name: &[u8]) -> Result<(), SymbolLengthError> {
     if name.is_empty() {
         return Err(SymbolLengthError::Empty);
     }
@@ -881,28 +871,6 @@ pub const BPS_PER_PERCENT: u32 = 100;
 /// Alias for the number of basis points in a single whole percent.
 pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
 
-/// Basis points per whole percentage: 100 basis points = 1%.
-///
-/// Useful for converting between whole-percentage and basis-point representations.
-pub const BPS_PER_PERCENT: u32 = 100;
-
-/// Alias for [`BPS_PER_PERCENT`]. Same value, more descriptive name.
-pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
-
-/// Basis points per whole percentage point (1% = 100 bps).
-pub const BPS_PER_PERCENT: u32 = 100;
-pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
-
-/// Basis points per percent: 100 bps = 1%.
-pub const BPS_PER_PERCENT: u32 = 100;
-
-/// Whole-per-cent to basis-points conversion factor: 1 percent = 100 bps.
-pub const BPS_PER_PERCENT: u32 = 100;
-
-/// Alias for [`BPS_PER_PERCENT`]; kept for documentation symmetry with
-/// [`BASIS_POINTS`]. Both constants equal 100.
-pub const BASIS_POINTS_PER_PERCENT: u32 = BPS_PER_PERCENT;
-
 /// Supported units for externally supplied rate inputs.
 ///
 /// Remitwise contracts currently accept only basis points. Treating a raw rate
@@ -946,8 +914,6 @@ pub enum RateError {
     Overflow,
 }
 
-pub const BPS_PER_PERCENT: u32 = 100;
-pub const BASIS_POINTS_PER_PERCENT: u32 = 100;
 
 /// A whole percentage value (1% = 100 basis points).
 ///
@@ -1058,42 +1024,15 @@ impl Rate {
     ///
     /// This is the safe entry point for untrusted inputs that carry an explicit
     /// unit field. Only supported units are accepted.
-    #[inline(always)]
-    pub fn try_from_input(value: u32, unit: u32) -> Result<Self, RateUnitError> {
+    #[inline(always)]    pub fn try_from_input(value: u32, unit: u32) -> Result<Self, RateUnitError> {
         require_supported_rate_unit(unit)?;
         Ok(Self::from_bps(value))
-    }
-
-    /// Construct a `Rate` from a whole percentage value.
-    #[inline(always)]
-    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
-        percent
-            .checked_mul(BPS_PER_PERCENT)
-            .map(Self::from_bps)
-            .ok_or(RateError::Overflow)
-    }
-
-    /// Construct a `Rate` from a `Percent` wrapper.
-    #[inline(always)]
-    pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
-        Self::from_percent(percent.to_percentage())
     }
 
     /// Return the raw basis-point value.
     #[inline(always)]
     pub fn to_bps(self) -> u32 {
         self.0
-    }
-
-    /// Create a `Rate` from a whole percentage value.
-    ///
-    /// Returns `Ok(Rate)` if `percent * 100` fits in `u32`, or `Err(RateError::Overflow)` otherwise.
-    #[inline(always)]
-    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
-        percent
-            .checked_mul(BPS_PER_PERCENT)
-            .map(Self)
-            .ok_or(RateError::Overflow)
     }
 
     /// Convert this rate back to a whole percentage integer value, truncating fractional basis points.
@@ -1128,27 +1067,6 @@ impl Rate {
             .and_then(|product| product.checked_div(BASIS_POINTS as i128))
             .ok_or(RateError::Overflow)
     }
-
-    /// Create a `Rate` from a whole percentage integer value.
-    ///
-    /// Returns `Ok(Rate)` if `percent * 100` fits in `u32`, or
-    /// `Err(RateError::Overflow)` otherwise.
-    #[inline(always)]
-    pub fn from_percent(percent: u32) -> Result<Self, RateError> {
-        percent
-            .checked_mul(BPS_PER_PERCENT)
-            .map(Self)
-            .ok_or(RateError::Overflow)
-    }
-
-    /// Create a `Rate` from a [`Percent`] type.
-    ///
-    /// Returns `Ok(Rate)` if the percentage value fits in `u32` basis
-    /// points, or `Err(RateError::Overflow)` otherwise.
-    #[inline(always)]
-    pub fn from_percent_type(percent: Percent) -> Result<Self, RateError> {
-        percent.to_rate()
-    }
 }
 
 impl ToI128Checked for Rate {
@@ -1156,18 +1074,6 @@ impl ToI128Checked for Rate {
     fn to_i128_checked(self) -> Result<i128, IntConversionError> {
         Ok(self.0 as i128)
     }
-}
-
-/// Construct a [`Rate`] from a [`Percent`] value.
-///
-/// This is a convenience wrapper around [`Rate::from_percent`] for callers
-/// that already have a typed [`Percent`].
-///
-/// # Errors
-/// Returns [`RateError::Overflow`] when the conversion overflows `u32`.
-#[inline(always)]
-pub fn from_percent_type(percent: Percent) -> Result<Rate, RateError> {
-    Rate::from_percent(percent.to_percentage())
 }
 
 /// Error related to time and periods.
@@ -1346,68 +1252,7 @@ pub enum TagError {
     InvalidChar { position: u32 },
 }
 
-/// Canonicalizes a single label string into a `Symbol`.
-///
-/// Rules:
-/// - Leading and trailing ASCII whitespace is stripped.
-/// - ASCII uppercase letters are folded to lowercase.
-/// - The result must satisfy `Symbol`'s charset (`[a-zA-Z0-9_]` after folding)
-///   and length (`1..=32` bytes after trimming), otherwise this panics.
-///
-/// # Idempotency guarantee
-///
-/// Applying this function twice to any input yields the same `Symbol`:
-/// `canonicalise_symbol(env, &canonicalise_symbol(env, &x).to_string()) == canonicalise_symbol(env, &x)`.
-///
-/// # Whitespace round-trip
-///
-/// Inputs that differ only in leading/trailing whitespace produce identical
-/// canonical `Symbol` values: `"hello"`, `" hello"`, and `"hello "` all map
-/// to `Symbol("hello")`.
-///
-/// # Panics
-///
-/// - On empty or whitespace-only input (after trimming length is 0).
-/// - On input over 32 bytes (after trimming).
-/// - When the trimmed, lowercased content contains bytes outside `[a-z0-9_]`.
-pub fn canonicalise_symbol(env: &Env, input: &soroban_sdk::String) -> Symbol {
-    let len = input.len();
-    if len == 0 {
-        panic!("symbol input must contain between 1 and 32 characters after trimming");
-    }
-    let mut buf = [0u8; 256];
-    if len as usize > buf.len() {
-        panic!("symbol input is too long");
-    }
-    input.copy_into_slice(&mut buf[..len as usize]);
 
-    let s = core::str::from_utf8(&buf[..len as usize])
-        .unwrap_or_else(|_| panic!("symbol input is not valid UTF-8"));
-
-    let trimmed = s.trim();
-    let trimmed_len = trimmed.len();
-    if trimmed_len == 0 {
-        panic!("symbol input must contain at least one non-whitespace character");
-    }
-    if trimmed_len > 32 {
-        panic!("symbol input must contain between 1 and 32 characters after trimming");
-    }
-
-    let trimmed_bytes = trimmed.as_bytes();
-    let mut canonical = [0u8; 32];
-    for (i, &byte) in trimmed_bytes.iter().enumerate() {
-        canonical[i] = if byte.is_ascii_uppercase() {
-            byte.to_ascii_lowercase()
-        } else {
-            byte
-        };
-    }
-
-    let canonical_str = core::str::from_utf8(&canonical[..trimmed_len])
-        .unwrap_or_else(|_| panic!("canonicalised symbol is not valid UTF-8"));
-
-    Symbol::new(env, canonical_str)
-}
 
 /// Signature verification failure.
 #[contracterror]
@@ -1595,56 +1440,7 @@ pub fn verify_slash_signature(
 /// Trims leading, trailing, and surrounding whitespace. Converts ASCII uppercase to lowercase.
 /// Allows only ASCII lowercase, digits, and underscores.
 /// Panics if the input contains invalid characters, is empty, or exceeds 32 bytes after trimming.
-pub fn canonicalise_symbol(env: &soroban_sdk::Env, input: &soroban_sdk::String) -> soroban_sdk::Symbol {
-    let len = input.len();
-    if len == 0 {
-        panic!("symbol input must contain between 1 and 32 characters");
-    }
-    
-    // We expect the untrimmed input to be small enough.
-    // If it's over 128 bytes, we can safely panic since a valid symbol is at most 32 bytes.
-    let actual_len = len as usize;
-    if actual_len > 128 {
-        panic!("symbol input must contain between 1 and 32 characters");
-    }
-    
-    let mut buf = [0u8; 128];
-    input.copy_into_slice(&mut buf[..actual_len]);
 
-    let mut start = 0;
-    while start < actual_len && buf[start] == b' ' {
-        start += 1;
-    }
-    
-    let mut end = actual_len;
-    while end > start && buf[end - 1] == b' ' {
-        end -= 1;
-    }
-    
-    if start == end {
-        panic!("non-whitespace character");
-    }
-    
-    let trimmed_len = end - start;
-    if trimmed_len == 0 || trimmed_len > 32 {
-        panic!("symbol input must contain between 1 and 32 characters");
-    }
-    
-    let mut out_buf = [0u8; 32];
-    for i in 0..trimmed_len {
-        let mut b = buf[start + i];
-        if b.is_ascii_uppercase() {
-            b += b'a' - b'A';
-        }
-        if !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
-            panic!("invalid Symbol character");
-        }
-        out_buf[i] = b;
-    }
-    
-    let s = core::str::from_utf8(&out_buf[..trimmed_len]).unwrap();
-    soroban_sdk::Symbol::new(env, s)
-}
 
 /// Validates and canonicalizes a batch of tags without panicking.
 ///
@@ -1879,71 +1675,7 @@ fn symbol_matches_known_case_insensitive(env: &Env, symbol: &Symbol, known: &str
     false
 }
 
-/// Canonicalizes a single label string into a `Symbol`.
-///
-/// Rules:
-/// - Leading and trailing ASCII whitespace is stripped.
-/// - ASCII uppercase letters are folded to lowercase.
-/// - The result must satisfy `Symbol`'s charset (`[a-zA-Z0-9_]` after folding)
-///   and length (`1..=32` bytes after trimming), otherwise this panics.
-///
-/// # Idempotency guarantee
-///
-/// Applying this function twice to any input yields the same `Symbol`:
-/// `canonicalise_symbol(env, &canonicalise_symbol(env, &x).to_string()) == canonicalise_symbol(env, &x)`.
-///
-/// # Whitespace round-trip
-///
-/// Inputs that differ only in leading/trailing whitespace produce identical
-/// canonical `Symbol` values: `"hello"`, `" hello"`, and `"hello "` all map
-/// to `Symbol("hello")`.
-///
-/// # Panics
-///
-/// - On empty or whitespace-only input (after trimming length is 0).
-/// - On input over 32 bytes (after trimming).
-/// - When the trimmed, lowercased content contains bytes outside `[a-z0-9_]`.
-pub fn canonicalise_symbol(env: &Env, input: &soroban_sdk::String) -> Symbol {
-    let len = input.len();
-    if len == 0 {
-        panic!("symbol input must contain between 1 and 32 characters after trimming");
-    }
-    let mut buf = [0u8; 256];
-    if len as usize > buf.len() {
-        panic!("symbol input is too long");
-    }
-    input.copy_into_slice(&mut buf[..len as usize]);
 
-    let s = core::str::from_utf8(&buf[..len as usize])
-        .unwrap_or_else(|_| panic!("symbol input is not valid UTF-8"));
-
-    let trimmed = s.trim();
-    let trimmed_len = trimmed.len();
-    if trimmed_len == 0 {
-        panic!("symbol input must contain at least one non-whitespace character");
-    }
-    if trimmed_len > 32 {
-        panic!("symbol input must contain between 1 and 32 characters after trimming");
-    }
-
-    let trimmed_bytes = trimmed.as_bytes();
-    let mut canonical = [0u8; 32];
-    for (i, &byte) in trimmed_bytes.iter().enumerate() {
-        canonical[i] = if byte.is_ascii_uppercase() {
-            byte.to_ascii_lowercase()
-        } else {
-            byte
-        };
-    }
-
-    let canonical_str = core::str::from_utf8(&canonical[..trimmed_len])
-        .unwrap_or_else(|_| panic!("canonicalised symbol is not valid UTF-8"));
-
-    Symbol::new(env, canonical_str)
-}
-
-/// Event emission helper
-pub struct RemitwiseEvents;
 
 #[cfg(test)]
 mod tests;
@@ -1984,6 +1716,9 @@ impl RemitwiseEvents {
             action,
         );
 
+        #[cfg(not(test))]
+        env.events().publish(topics, data);
+
         #[cfg(test)]
         {
             use soroban_sdk::TryFromVal;
@@ -1997,9 +1732,8 @@ impl RemitwiseEvents {
                     );
                 }
             }
+            env.events().publish(topics, val);
         }
-
-        env.events().publish(topics, data);
     }
 
     /// Emits a batch event for the given category and action with a count.
@@ -2020,7 +1754,13 @@ impl RemitwiseEvents {
             symbol_short!("batch"),
         );
         let data = (action, count);
+        #[cfg(not(test))]
         env.events().publish(topics, data);
+        #[cfg(test)]
+        {
+            let val: soroban_sdk::Val = data.into_val(env);
+            env.events().publish(topics, val);
+        }
     }
 
     /// Test helper: asserts that the most recently emitted Remitwise event has

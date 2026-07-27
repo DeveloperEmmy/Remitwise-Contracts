@@ -1769,9 +1769,9 @@ proptest! {
     }
 }
 
-// ─── require_valid_symbol_length ─────────────────────────────────────────────
+// ─── require_valid_symbol_name_length ─────────────────────────────────────────
 //
-// These tests lock in the boundary contract for [`require_valid_symbol_length`]:
+// These tests lock in the boundary contract for [`require_valid_symbol_name_length`]:
 //
 // - Empty input (0 bytes)  → Err(SymbolLengthError::Empty)
 // - 1-byte input           → Ok(())   (lower inclusive boundary)
@@ -1788,7 +1788,7 @@ proptest! {
 #[test]
 fn require_valid_symbol_length_empty_input_returns_empty_error() {
     assert_eq!(
-        require_valid_symbol_length(b""),
+        require_valid_symbol_name_length(b""),
         Err(SymbolLengthError::Empty),
         "empty name must be rejected with SymbolLengthError::Empty"
     );
@@ -1798,7 +1798,7 @@ fn require_valid_symbol_length_empty_input_returns_empty_error() {
 #[test]
 fn require_valid_symbol_length_one_char_returns_ok() {
     assert_eq!(
-        require_valid_symbol_length(b"A"),
+        require_valid_symbol_name_length(b"A"),
         Ok(()),
         "1-byte name is the lower boundary and must be accepted"
     );
@@ -1811,7 +1811,7 @@ fn require_valid_symbol_length_nine_chars_returns_ok() {
     const NAME: &[u8] = b"NINE_BYTE"; // 9 bytes
     const _: () = assert!(NAME.len() == 9);
     assert_eq!(
-        require_valid_symbol_length(NAME),
+        require_valid_symbol_name_length(NAME),
         Ok(()),
         "9-byte name is exactly at the symbol_short! cap and must be accepted"
     );
@@ -1823,7 +1823,7 @@ fn require_valid_symbol_length_ten_chars_returns_too_long_error() {
     const NAME: &[u8] = b"TEN_BYTES_"; // 10 bytes
     const _: () = assert!(NAME.len() == 10);
     assert_eq!(
-        require_valid_symbol_length(NAME),
+        require_valid_symbol_name_length(NAME),
         Err(SymbolLengthError::TooLong),
         "10-byte name exceeds the symbol_short! cap and must be rejected with SymbolLengthError::TooLong"
     );
@@ -1834,7 +1834,7 @@ fn require_valid_symbol_length_ten_chars_returns_too_long_error() {
 fn require_valid_symbol_length_very_long_input_returns_too_long_error() {
     let name = b"TOOLONGKEYNAME"; // 14 bytes
     assert_eq!(
-        require_valid_symbol_length(name),
+        require_valid_symbol_name_length(name),
         Err(SymbolLengthError::TooLong),
         "names well above the cap must also be rejected with SymbolLengthError::TooLong"
     );
