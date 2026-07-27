@@ -1673,6 +1673,8 @@ impl Insurance {
 }
 
 #[cfg(test)]
+mod events_schema_test;
+#[cfg(test)]
 mod next_payment_scheduling_tests;
 #[cfg(test)]
 mod test;
