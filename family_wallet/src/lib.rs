@@ -398,6 +398,12 @@ pub enum Error {
     /// percentages do not sum to exactly 100.
     InvalidSplitConfig = 25,
     SnapshotTooOld = 26,
+    /// The requested destructive state change (member removal, multisig
+    /// reconfiguration) was rejected because the wallet has pending
+    /// multisig proposals.  Allowing the change while proposals are
+    /// in-flight could cause orphaned signatures, silently-invalid quorum
+    /// calculations, or execution against stale configuration.
+    PendingOperationsExist = 27,
 }
 
 #[contractimpl]
@@ -729,6 +735,10 @@ impl FamilyWallet {
     ) -> Result<bool, Error> {
         caller.require_auth();
         Self::require_not_paused(&env);
+
+        // Defence-in-depth: block reconfiguration while multisig proposals are
+        // in-flight to prevent execution against stale threshold / signer set.
+        Self::require_no_pending_operations(&env)?;
 
         let members: Map<Address, FamilyMember> = env
             .storage()
@@ -1397,6 +1407,11 @@ impl FamilyWallet {
     pub fn remove_family_member(env: Env, caller: Address, member: Address) -> bool {
         caller.require_auth();
         Self::require_not_paused(&env);
+
+        // Defence-in-depth: block removal while multisig proposals are in-flight
+        // to prevent orphaned signatures and stale quorum calculations.
+        Self::require_no_pending_operations(&env)
+            .unwrap_or_else(|e| panic_with_error!(&env, e));
 
         let owner: Address = env
             .storage()
@@ -3433,6 +3448,24 @@ impl FamilyWallet {
         if Self::get_global_paused(env) {
             panic!("Contract is paused");
         }
+    }
+
+    /// Reject the call when the wallet has pending multisig proposals.
+    ///
+    /// Destructive state changes (member removal, multisig reconfiguration)
+    /// while proposals are in-flight risk orphaned signatures, silently
+    /// invalid quorum calculations, or execution against stale configuration.
+    fn require_no_pending_operations(env: &Env) -> Result<(), Error> {
+        let pending_txs: Map<u64, PendingTransaction> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("PEND_TXS"))
+            .unwrap_or_else(|| Map::new(env));
+
+        if pending_txs.len() > 0 {
+            return Err(Error::PendingOperationsExist);
+        }
+        Ok(())
     }
 
     fn extend_instance_ttl(env: &Env) {

@@ -7951,3 +7951,96 @@ fn slashed_funds_route_to_current_recipient_not_stale_destination() {
         "owner must lose exactly two slash amounts",
     );
 }
+
+// ─── Pending-operations guard (defence-in-depth) ───────────────────────────
+// Destructive state changes must be rejected while multisig proposals are
+// in-flight to prevent orphaned signatures, stale quorum calculations, or
+// execution against an outdated signer set / threshold.
+
+/// Helper: set up a wallet with multisig configs and create one pending proposal.
+fn setup_wallet_with_pending_proposal() -> (Env, FamilyWalletClient<'static>, Address) {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member1 = Address::generate(&env);
+    let member2 = Address::generate(&env);
+    let initial_members = vec![&env, member1.clone(), member2.clone()];
+
+    client.init(&owner, &initial_members);
+
+    // Configure multisig for EmergencyTransfer (3-of-3) so propose_emergency_transfer works
+    let all_members = vec![&env, owner.clone(), member1.clone(), member2.clone()];
+    client.configure_multisig(
+        &owner,
+        &TransactionType::RegularWithdrawal,
+        &1,
+        &all_members,
+        &1000_0000000,
+    );
+    client.configure_multisig(
+        &owner,
+        &TransactionType::EmergencyTransfer,
+        &3,
+        &all_members,
+        &0,
+    );
+
+    // Set up token so the proposal can be created
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    StellarAssetClient::new(&env, &token_contract.address()).mint(&owner, &5000_0000000);
+
+    // Create a pending proposal — this populates PEND_TXS
+    let recipient = Address::generate(&env);
+    client.propose_emergency_transfer(
+        &owner,
+        &token_contract.address(),
+        &recipient,
+        &3000_0000000,
+    );
+
+    (env, client, owner)
+}
+
+#[test]
+fn test_remove_member_blocked_by_pending_operations() {
+    let (env, client, owner) = setup_wallet_with_pending_proposal();
+    let member1 = Address::generate(&env);
+
+    // Try to remove a member while a proposal is pending.
+    // remove_family_member panics with the typed error via panic_with_error!.
+    let result = client.try_remove_family_member(&owner, &member1);
+    assert_eq!(
+        result,
+        Err(Ok(soroban_sdk::Error::from(
+            Error::PendingOperationsExist
+        ))),
+        "remove_family_member must reject when pending proposals exist"
+    );
+}
+
+#[test]
+fn test_configure_multisig_blocked_by_pending_operations() {
+    let (env, client, owner) = setup_wallet_with_pending_proposal();
+    let member1 = Address::generate(&env);
+    let member2 = Address::generate(&env);
+    let signers = vec![&env, owner.clone(), member1.clone(), member2.clone()];
+
+    // Try to reconfigure multisig while a proposal is pending.
+    // configure_multisig returns Result<bool, Error>.
+    let result = client.try_configure_multisig(
+        &owner,
+        &TransactionType::LargeWithdrawal,
+        &2,
+        &signers,
+        &500_0000000,
+    );
+    assert_eq!(
+        result,
+        Err(Ok(Error::PendingOperationsExist)),
+        "configure_multisig must reject when pending proposals exist"
+    );
+}
