@@ -404,6 +404,8 @@ pub enum Error {
     /// in-flight could cause orphaned signatures, silently-invalid quorum
     /// calculations, or execution against stale configuration.
     PendingOperationsExist = 27,
+    /// The supplied expiry timestamp is in the past.
+    RoleExpiryInPast = 28,
 }
 
 #[contractimpl]
@@ -1869,6 +1871,16 @@ impl FamilyWallet {
             .unwrap_or_else(|| panic!("Wallet not initialized"));
         if members.get(member.clone()).is_none() {
             panic!("Member not found");
+        }
+
+        // Reject expiry timestamps that are in the past — setting an already-
+        // expired role timestamp would immediately lock the member out of
+        // their role with no way to recover except through admin intervention.
+        if let Some(t) = expires_at {
+            let now = env.ledger().timestamp();
+            if t <= now {
+                panic_with_error!(&env, Error::RoleExpiryInPast);
+            }
         }
 
         let mut m: Map<Address, u64> = env
