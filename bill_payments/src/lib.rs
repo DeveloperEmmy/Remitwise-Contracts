@@ -129,7 +129,6 @@ const STORAGE_EXT_REF_IDX: Symbol = symbol_short!("EXTRIDX");
 const STORAGE_OWNER_INDEX: Symbol = symbol_short!("OWN_IDX");
 const STORAGE_ARCH_INDEX: Symbol = symbol_short!("ARCH_IDX");
 const STORAGE_CURRENCY_INDEX: Symbol = symbol_short!("CUR_IDX");
-const ARCH_IDX_KEY: Symbol = STORAGE_ARCH_INDEX;
 const STORAGE_NEXT_BSCH: Symbol = symbol_short!("NEXT_BSCH");
 const STORAGE_OWNER_BSCH_IDX: Symbol = symbol_short!("OWN_BSCH");
 const STORAGE_BSCHEDS: Symbol = symbol_short!("BSCHEDS");
@@ -2675,43 +2674,44 @@ impl BillPayments {
             .get(&symbol_short!("ARCH_BILL"))
             .unwrap_or_else(|| Map::new(&env));
 
-        let ids = Self::get_owner_index(&env, &owner);
-        let mut items: Vec<ArchivedBill> = Vec::new(&env);
+        // Use the archived owner index for O(owner_archived) traversal.
+        let owner_ids = Self::get_owner_archived_bills(&env, &owner);
 
-        for id in ids.iter() {
+        let mut staging: Vec<ArchivedBill> = Vec::new(&env);
+        for id in owner_ids.iter() {
             if id <= cursor {
                 continue;
             }
             if let Some(bill) = archived.get(id) {
-                items.push_back(bill);
+                staging.push_back(bill);
             }
-            if items.len() > effective_limit {
+            if staging.len() > effective_limit {
                 break;
             }
         }
 
-        let has_next = items.len() > effective_limit;
+        let has_next = staging.len() > effective_limit;
         let mut next_cursor: u32 = 0;
 
         if has_next {
             // next_cursor = last item on the current page (before truncation)
             let last_idx = effective_limit - 1;
-            if let Some(bill) = items.get(last_idx) {
+            if let Some(bill) = staging.get(last_idx) {
                 next_cursor = bill.id;
             }
             // Truncate to effective_limit
             let mut truncated: Vec<ArchivedBill> = Vec::new(&env);
             for i in 0..effective_limit {
-                if let Some(bill) = items.get(i) {
+                if let Some(bill) = staging.get(i) {
                     truncated.push_back(bill);
                 }
             }
-            items = truncated;
+            staging = truncated;
         }
 
-        let count = items.len();
+        let count = staging.len();
         ArchivedBillPage {
-            items,
+            items: staging,
             next_cursor,
             count,
         }
@@ -3439,17 +3439,6 @@ impl BillPayments {
     }
     fn get_unpaid_totals_map(env: &Env) -> Option<Map<Address, i128>> {
         env.storage().instance().get(&STORAGE_UNPAID_TOTALS)
-    }
-
-    /// Read the owner's archived bill ID list from ARCH_IDX.
-    /// Returns an empty Vec if no entry exists for this owner.
-    fn get_owner_index(env: &Env, owner: &Address) -> Vec<u32> {
-        let idx: Map<Address, Vec<u32>> = env
-            .storage()
-            .instance()
-            .get(&ARCH_IDX_KEY)
-            .unwrap_or_else(|| Map::new(env));
-        idx.get(owner.clone()).unwrap_or_else(|| Vec::new(env))
     }
 
     fn adjust_unpaid_total(env: &Env, owner: &Address, delta: i128) {
