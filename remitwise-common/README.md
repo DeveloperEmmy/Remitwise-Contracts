@@ -174,6 +174,24 @@ See `docs/type-safe-percent-conversion.md` for complete documentation.
 
 ## Utilities
 
+### `same_address(a, b)`
+
+Compares two Soroban `Address` values by reference without requiring the
+caller to clone either address:
+
+```rust
+if same_address(&stored_owner, &caller) {
+    // addresses match — no clone needed
+}
+```
+
+`Address` does not implement `Copy`, so a direct `==` comparison would
+normally require two owned values (consuming both, or cloning one). This
+helper accepts both addresses by shared reference and delegates to the
+host-native equality check, keeping call-site code clean.
+
+The helper does not normalise, modify, or consume either address.
+
 ### `clamp_limit(limit)`
 
 Normalizes pagination limits:

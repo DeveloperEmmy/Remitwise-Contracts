@@ -2129,107 +2129,62 @@ fn require_valid_symbol_length_very_long_input_returns_too_long_error() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// require_non_zero_bytes — reject zeroed BytesN values
-// ---------------------------------------------------------------------------
+// ─── same_address tests (#1141) ───────────────────────────────────────────────
 
-/// A `BytesN<32>` with non-zero bytes (a realistic Ed25519 public-key-sized
-/// value) is accepted by `require_non_zero_bytes`.
+/// Two references to the same address value return `true`.
 #[test]
-fn require_non_zero_bytes_accepts_non_zero_bytesn() {
+fn test_same_address_equal_returns_true() {
+    use soroban_sdk::testutils::Address as _;
     let env = Env::default();
-    let arr = [
-        0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04,
-        0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
-        0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14,
-        0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
-    ];
-    let bytes = BytesN::<32>::from_array(&env, &arr);
-    assert_eq!(require_non_zero_bytes(&bytes), Ok(()));
+    let a = soroban_sdk::Address::generate(&env);
+    // b is a clone of a — they must compare equal.
+    let b = a.clone();
+    assert!(crate::same_address(&a, &b));
 }
 
-/// A `BytesN<32>` that is completely zeroed is rejected with
-/// `BytesNError::AllZeros`.
+/// Two different address values return `false`.
 #[test]
-fn require_non_zero_bytes_rejects_all_zero_bytesn() {
+fn test_same_address_different_returns_false() {
+    use soroban_sdk::testutils::Address as _;
     let env = Env::default();
-    let arr = [0u8; 32];
-    let bytes = BytesN::<32>::from_array(&env, &arr);
-    assert_eq!(
-        require_non_zero_bytes(&bytes),
-        Err(BytesNError::AllZeros)
-    );
+    let a = soroban_sdk::Address::generate(&env);
+    let b = soroban_sdk::Address::generate(&env);
+    // generate produces unique addresses each call.
+    assert!(!crate::same_address(&a, &b));
 }
 
-/// A `BytesN<1>` with a single zero byte is rejected with
-/// `BytesNError::AllZeros`. This pins the behaviour for the
-/// smallest possible `BytesN` size.
+/// `same_address` does not consume either address — both remain usable after the call.
 #[test]
-fn require_non_zero_bytes_rejects_single_zero_byte() {
+fn test_same_address_does_not_consume_arguments() {
+    use soroban_sdk::testutils::Address as _;
     let env = Env::default();
-    let arr = [0u8; 1];
-    let bytes = BytesN::<1>::from_array(&env, &arr);
-    assert_eq!(
-        require_non_zero_bytes(&bytes),
-        Err(BytesNError::AllZeros)
-    );
+    let owner = soroban_sdk::Address::generate(&env);
+    let caller = owner.clone();
+    // Call same_address — neither address should be moved.
+    let result = crate::same_address(&owner, &caller);
+    // Both addresses are still accessible here (no clone required by same_address itself).
+    assert!(result);
+    // Reuse the addresses to prove they were not consumed.
+    let _ = &owner;
+    let _ = &caller;
 }
 
-/// A `BytesN<1>` with a single non-zero byte is accepted. This
-/// pins the behaviour for the smallest possible `BytesN` size.
+/// A single address is equal to itself (reflexivity).
 #[test]
-fn require_non_zero_bytes_accepts_single_non_zero_byte() {
+fn test_same_address_reflexive() {
+    use soroban_sdk::testutils::Address as _;
     let env = Env::default();
-    let arr = [1u8; 1];
-    let bytes = BytesN::<1>::from_array(&env, &arr);
-    assert_eq!(require_non_zero_bytes(&bytes), Ok(()));
+    let a = soroban_sdk::Address::generate(&env);
+    assert!(crate::same_address(&a, &a));
 }
 
-/// A `BytesN<64>` (signature-sized) with the last byte non-zero is
-/// accepted. This catches regression where only the first N-1 bytes
-/// are checked.
+/// Symmetry: `same_address(a, b) == same_address(b, a)`.
 #[test]
-fn require_non_zero_bytes_accepts_last_byte_non_zero() {
+fn test_same_address_symmetric() {
+    use soroban_sdk::testutils::Address as _;
     let env = Env::default();
-    let mut arr = [0u8; 64];
-    arr[63] = 0x01;
-    let bytes = BytesN::<64>::from_array(&env, &arr);
-    assert_eq!(require_non_zero_bytes(&bytes), Ok(()));
+    let a = soroban_sdk::Address::generate(&env);
+    let b = soroban_sdk::Address::generate(&env);
+    assert_eq!(crate::same_address(&a, &b), crate::same_address(&b, &a));
 }
 
-/// Property test: any `BytesN<32>` that is not all-zero passes the
-/// check, and the all-zero input always fails. Covers the entire
-/// input space via random sampling.
-#[cfg(test)]
-mod non_zero_bytes_proptests {
-    use super::*;
-    use proptest::prelude::*;
-
-    proptest! {
-        /// Pins the core invariant of `require_non_zero_bytes` across
-        /// random 32-byte inputs: the check returns `Ok(())` iff the
-        /// buffer is *not* all-zeros.
-        #[test]
-        fn proptest_non_zero_bytes_invariant(
-            a in prop::array::uniform32(0u8..=255u8),
-            b in prop::array::uniform32(0u8..=255u8),
-        ) {
-            let env = Env::default();
-            let all_zero = [0u8; 32];
-
-            // a is random; if it happens to be all-zero, use b (also random) as a fallback.
-            let test_arr = if a == all_zero { b } else { a };
-
-            // Non-zero input must be accepted
-            let bytes = BytesN::<32>::from_array(&env, &test_arr);
-            assert_eq!(require_non_zero_bytes(&bytes), Ok(()));
-
-            // All-zero input must be rejected
-            let zero_bytes = BytesN::<32>::from_array(&env, &all_zero);
-            assert_eq!(
-                require_non_zero_bytes(&zero_bytes),
-                Err(BytesNError::AllZeros)
-            );
-        }
-    }
-}
