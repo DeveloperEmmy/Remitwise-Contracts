@@ -275,8 +275,8 @@ pub enum SymbolError {
 }
 
 /// Returns [`SymbolError::SymbolTooLong`] when the symbol exceeds 9 bytes.
-pub fn require_valid_symbol_length(env: &Env, sym: &Symbol) -> Result<(), SymbolError> {
-    let val: soroban_sdk::Val = sym.into_val(env);
+pub fn require_valid_symbol_length(_env: &Env, sym: &Symbol) -> Result<(), SymbolError> {
+    let val: soroban_sdk::Val = sym.to_val();
     if val.is_object() {
         Err(SymbolError::SymbolTooLong)
     } else {
