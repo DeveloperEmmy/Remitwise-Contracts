@@ -21,6 +21,7 @@ pub enum Error {
 enum DataKey {
     Admin,
     GlobalPaused,
+    PausedSince,
     ModulePaused(Symbol),
     PausedFunctions(Symbol),
     UnpauseSchedule,
@@ -70,7 +71,7 @@ impl EmergencyKillswitch {
     ///
     /// # Errors
     /// - [`Error::EpochMismatch`] if the provided epoch does not match.
-    pub fn require_matching_kill_switch_epoch(env: Env, ep: u64) -> Result<(), Error> {
+    pub fn require_killswitch_epoch(env: Env, ep: u64) -> Result<(), Error> {
         let current: u64 = env
             .storage()
             .instance()
@@ -116,9 +117,7 @@ impl EmergencyKillswitch {
             .instance()
             .get(&DataKey::KillSwitchEpoch)
             .unwrap_or(0);
-        let new_epoch = old_epoch
-            .checked_add(1)
-            .ok_or(Error::InvalidAdmin)?; // Overflow guard — saturate on wrap
+        let new_epoch = old_epoch.checked_add(1).ok_or(Error::InvalidAdmin)?; // Overflow guard — saturate on wrap
         env.storage()
             .instance()
             .set(&DataKey::KillSwitchEpoch, &new_epoch);
@@ -148,7 +147,7 @@ impl EmergencyKillswitch {
     ///
     /// Emits [AdminTransferred] on successful handover.
     pub fn transfer_admin(env: Env, new_admin: Address, ep: u64) -> Result<(), Error> {
-        Self::require_matching_kill_switch_epoch(env.clone(), ep)?;
+        Self::require_killswitch_epoch(env.clone(), ep)?;
         let admin: Address = env
             .storage()
             .instance()
@@ -185,6 +184,9 @@ impl EmergencyKillswitch {
             .ok_or(Error::NotInitialized)?;
         admin.require_auth();
         env.storage().instance().set(&DataKey::GlobalPaused, &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::PausedSince, &env.ledger().timestamp());
         env.storage().instance().remove(&DataKey::UnpauseSchedule);
         env.events().publish(
             (
@@ -215,6 +217,7 @@ impl EmergencyKillswitch {
             return Err(Error::Unauthorized);
         }
         env.storage().instance().set(&DataKey::GlobalPaused, &false);
+        env.storage().instance().remove(&DataKey::PausedSince);
         env.storage().instance().remove(&DataKey::UnpauseSchedule);
         env.events().publish(
             (
@@ -255,6 +258,7 @@ impl EmergencyKillswitch {
             .ok_or(Error::NotInitialized)?;
         admin.require_auth();
         env.storage().instance().set(&DataKey::GlobalPaused, &false);
+        env.storage().instance().remove(&DataKey::PausedSince);
         env.storage().instance().remove(&DataKey::UnpauseSchedule);
         env.events().publish(
             (
@@ -290,6 +294,21 @@ impl EmergencyKillswitch {
             .instance()
             .get(&DataKey::GlobalPaused)
             .unwrap_or(false)
+    }
+
+    pub fn get_paused_since(env: Env) -> Option<u64> {
+        if Self::is_paused(env.clone()) {
+            env.storage().instance().get(&DataKey::PausedSince)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_pause_state(env: Env) -> remitwise_common::PauseState {
+        remitwise_common::PauseState {
+            paused: Self::is_paused(env.clone()),
+            paused_since: Self::get_paused_since(env),
+        }
     }
 
     /// Returns the pending unpause timestamp set by `schedule_unpause`, or `None` if no unpause
@@ -608,6 +627,36 @@ mod tests {
         assert_eq!(res, Err(Ok(Error::InvalidAdmin)));
     }
 
+    #[test]
+    fn test_paused_since_and_pause_state() {
+        let (env, client) = setup_env();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(client.get_paused_since(), None);
+        let initial_state = client.get_pause_state();
+        assert!(!initial_state.paused);
+        assert_eq!(initial_state.paused_since, None);
+
+        let now = 1_000_000u64;
+        env.ledger().with_mut(|li| li.timestamp = now);
+        client.pause();
+
+        assert_eq!(client.get_paused_since(), Some(now));
+        let paused_state = client.get_pause_state();
+        assert!(paused_state.paused);
+        assert_eq!(paused_state.paused_since, Some(now));
+
+        client.schedule_unpause(&(now + 100));
+        env.ledger().with_mut(|li| li.timestamp = now + 200);
+        client.unpause();
+
+        assert_eq!(client.get_paused_since(), None);
+        let unpaused_state = client.get_pause_state();
+        assert!(!unpaused_state.paused);
+        assert_eq!(unpaused_state.paused_since, None);
+    }
+
     /// Verify DataKey::Admin value is updated by checking a second transfer
     /// succeeds (new admin is stored).
     #[test]
@@ -683,25 +732,25 @@ mod tests {
         assert_eq!(ep, 0);
     }
 
-    /// require_matching_kill_switch_epoch passes with correct epoch.
+    /// require_killswitch_epoch passes with correct epoch.
     #[test]
-    fn test_require_matching_kill_switch_epoch_ok() {
+    fn test_require_killswitch_epoch_ok() {
         let (env, client) = setup_env();
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        let res = client.try_require_matching_kill_switch_epoch(&0);
+        let res = client.try_require_killswitch_epoch(&0);
         assert_eq!(res, Ok(Ok(())));
     }
 
-    /// require_matching_kill_switch_epoch fails with wrong epoch.
+    /// require_killswitch_epoch fails with wrong epoch.
     #[test]
-    fn test_require_matching_kill_switch_epoch_fails() {
+    fn test_require_killswitch_epoch_fails() {
         let (env, client) = setup_env();
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        let res = client.try_require_matching_kill_switch_epoch(&42);
+        let res = client.try_require_killswitch_epoch(&42);
         assert_eq!(res, Err(Ok(Error::EpochMismatch)));
     }
 
